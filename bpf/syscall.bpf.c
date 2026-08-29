@@ -45,6 +45,7 @@ static __always_inline void fill_common(struct event *e, __u32 op)
 	e->ret = 0;
 	e->remote_addr = 0;
 	e->remote_port = 0;
+	e->total_len = 0;
 	e->data_len = 0;
 }
 
@@ -86,8 +87,21 @@ int trace_enter_write(struct trace_event_raw_sys_enter *ctx)
 	fill_common(e, OP_WRITE);
 	e->fd = (__s32)ctx->args[0];
 
+	/* write() on the blocking sockets these apps use returns the full
+	 * requested count or errors, so args[2] stands in for the true byte
+	 * count without needing a sys_exit_write stash/pair (partial writes on
+	 * a blocking fd are the documented edge case this approximates). */
 	__u64 count = ctx->args[2];
-	__u32 len = count < sizeof(e->data) ? (__u32)count : sizeof(e->data);
+	e->total_len = (__u32)count;
+
+	/* Clamp to DATA_CAP-1 (not DATA_CAP) before masking: DATA_CAP-1 is the
+	 * mask, and masking a value already <= DATA_CAP-1 is a no-op, which is
+	 * what lets the verifier prove the bound statically. Clamping to
+	 * DATA_CAP itself would let the mask wrap an exact-cap value to 0. */
+	__u32 len = (__u32)count;
+	if (len > DATA_CAP - 1)
+		len = DATA_CAP - 1;
+	len &= (DATA_CAP - 1);
 	if (bpf_probe_read_user(e->data, len, (void *)ctx->args[1]) == 0)
 		e->data_len = len;
 
@@ -137,9 +151,12 @@ int trace_exit_read(struct trace_event_raw_sys_exit *ctx)
 	fill_common(e, OP_READ);
 	e->fd = fd;
 	e->ret = (__s32)ctx->ret;
+	e->total_len = (__u32)ctx->ret;
 
-	__u64 count = ctx->ret;
-	__u32 len = count < sizeof(e->data) ? (__u32)count : sizeof(e->data);
+	__u32 len = (__u32)ctx->ret;
+	if (len > DATA_CAP - 1)
+		len = DATA_CAP - 1;
+	len &= (DATA_CAP - 1);
 	if (bpf_probe_read_user(e->data, len, (void *)buf) == 0)
 		e->data_len = len;
 

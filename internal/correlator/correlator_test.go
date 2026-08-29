@@ -39,8 +39,8 @@ func runCorrelator(t *testing.T, events []collector.Event) []Connection {
 func TestConnectionTracksByteCounts(t *testing.T) {
 	events := []collector.Event{
 		{PID: 1, FD: 7, Operation: collector.OpConnect, RemoteAddr: 0x0100007f, RemotePort: 5432},
-		{PID: 1, FD: 7, Operation: collector.OpWrite, DataLen: 128},
-		{PID: 1, FD: 7, Operation: collector.OpRead, DataLen: 512},
+		{PID: 1, FD: 7, Operation: collector.OpWrite, TotalLen: 128, DataLen: 128},
+		{PID: 1, FD: 7, Operation: collector.OpRead, TotalLen: 512, DataLen: 512},
 		{PID: 1, FD: 7, Operation: collector.OpClose},
 	}
 
@@ -72,11 +72,11 @@ func TestFDReuseProducesDistinctConnections(t *testing.T) {
 	events := []collector.Event{
 		// First connection on fd 7: to 10.0.0.1, writes 100 bytes, closes.
 		{PID: 1, FD: 7, Operation: collector.OpConnect, RemoteAddr: 0x0100000a, RemotePort: 111},
-		{PID: 1, FD: 7, Operation: collector.OpWrite, DataLen: 100},
+		{PID: 1, FD: 7, Operation: collector.OpWrite, TotalLen: 100, DataLen: 100},
 		{PID: 1, FD: 7, Operation: collector.OpClose},
 		// Second connection reuses fd 7: to 10.0.0.2, writes 200 bytes, closes.
 		{PID: 1, FD: 7, Operation: collector.OpConnect, RemoteAddr: 0x0200000a, RemotePort: 222},
-		{PID: 1, FD: 7, Operation: collector.OpWrite, DataLen: 200},
+		{PID: 1, FD: 7, Operation: collector.OpWrite, TotalLen: 200, DataLen: 200},
 		{PID: 1, FD: 7, Operation: collector.OpClose},
 	}
 
@@ -101,6 +101,23 @@ func TestFDReuseProducesDistinctConnections(t *testing.T) {
 	}
 	if second.RemotePort != 222 || second.BytesOut != 200 {
 		t.Errorf("second connection corrupted (likely merged with first): port=%d bytesOut=%d", second.RemotePort, second.BytesOut)
+	}
+}
+
+// TestByteCountsUseTotalLenNotDataLen guards against the bug this fix
+// corrected: a write/read larger than the capture buffer must still count
+// its true byte total, not the truncated captured payload length.
+func TestByteCountsUseTotalLenNotDataLen(t *testing.T) {
+	events := []collector.Event{
+		{PID: 1, FD: 7, Operation: collector.OpConnect},
+		// A 10KB write, but only 4096 bytes of payload were captured.
+		{PID: 1, FD: 7, Operation: collector.OpWrite, TotalLen: 10_000, DataLen: 4096},
+	}
+
+	got := runCorrelator(t, events)
+	final := got[len(got)-1]
+	if final.BytesOut != 10_000 {
+		t.Fatalf("BytesOut = %d, want 10000 (the true count, not the 4096-byte capture cap)", final.BytesOut)
 	}
 }
 

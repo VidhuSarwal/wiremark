@@ -64,12 +64,33 @@ func TestDecodeEventTruncatedRecord(t *testing.T) {
 }
 
 func TestEventStructSizeMatchesCStruct(t *testing.T) {
-	// bpf/types.h's struct event is 296 bytes: 4 __u32/​__s32 pairs (16) +
-	// 8-byte timestamp + 4 more 4-byte fields (16) + 2-byte port + 2-byte
-	// pad + 4-byte data_len + 256-byte data = 296, 8-byte aligned.
-	const wantSize = 296
+	// bpf/types.h's struct event: pid+tid (8) + timestamp (8) + fd+op+ret
+	// (12) + remote_addr (4) + remote_port (2) + 2-byte pad + total_len (4)
+	// + data_len (4) + data[4096] = 4140, rounded up to 4144 for the
+	// struct's 8-byte alignment (from the __u64 timestamp).
+	const wantSize = 4144
 	if got := len(encodeEvent(t, Event{})); got != wantSize {
 		t.Fatalf("encoded Event size = %d bytes, want %d (must match bpf/types.h's struct event)", got, wantSize)
+	}
+}
+
+func TestTruncated(t *testing.T) {
+	tests := []struct {
+		name              string
+		totalLen, dataLen uint32
+		want              bool
+	}{
+		{"fully captured", 100, 100, false},
+		{"truncated", 5000, 4096, true},
+		{"zero-length event", 0, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := Event{TotalLen: tt.totalLen, DataLen: tt.dataLen}
+			if got := ev.Truncated(); got != tt.want {
+				t.Errorf("Truncated() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -75,12 +75,15 @@ func Run(events <-chan collector.Event, timeOf func(collector.Event) time.Time) 
 				conns <- *c
 			case collector.OpWrite:
 				if c, ok := tracked[k]; ok {
-					c.BytesOut += uint64(ev.DataLen)
+					// TotalLen, not DataLen: DataLen is capped at the
+					// capture buffer size, TotalLen is the syscall's true
+					// byte count.
+					c.BytesOut += uint64(ev.TotalLen)
 					conns <- *c
 				}
 			case collector.OpRead:
 				if c, ok := tracked[k]; ok {
-					c.BytesIn += uint64(ev.DataLen)
+					c.BytesIn += uint64(ev.TotalLen)
 					conns <- *c
 				}
 			case collector.OpClose:

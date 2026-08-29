@@ -23,6 +23,9 @@ const (
 	OpClose   uint32 = 3
 )
 
+// dataCap must match bpf/types.h's DATA_CAP.
+const dataCap = 4096
+
 // Event mirrors bpf/types.h's struct event.
 type Event struct {
 	PID        uint32
@@ -34,13 +37,24 @@ type Event struct {
 	RemoteAddr uint32
 	RemotePort uint16
 	_          uint16 // padding to match C struct layout
-	DataLen    uint32
-	Data       [256]byte
+	TotalLen   uint32 // true byte count for OpRead/OpWrite; may exceed DataLen
+	DataLen    uint32 // captured (possibly truncated) length of Data
+	Data       [dataCap]byte
+	_          [4]byte // trailing padding to match the C struct's 8-byte alignment
 }
 
-// Payload returns the captured bytes for a read/write event.
+// Payload returns the captured bytes for a read/write event. Truncated
+// reports whether TotalLen exceeds what was actually captured -- callers
+// assembling a byte stream (e.g. for HTTP decoding) need to know when data
+// is missing rather than silently parsing a partial stream as complete.
 func (e Event) Payload() []byte {
 	return e.Data[:e.DataLen]
+}
+
+// Truncated reports whether the syscall's true byte count exceeded what
+// this event captured.
+func (e Event) Truncated() bool {
+	return e.TotalLen > e.DataLen
 }
 
 // RemoteAddrString renders RemoteAddr/RemotePort as "a.b.c.d:port", valid

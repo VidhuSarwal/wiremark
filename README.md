@@ -1,8 +1,12 @@
 # eTraceReplay
 
 A per-PID syscall/socket tracer built on eBPF (CO-RE via `cilium/ebpf` + `bpf2go`), with a
-`bubbletea` TUI. This is Milestones 1–3 of a larger eBPF traffic-recording project — see
-[Roadmap](#roadmap) for what's deliberately not built yet.
+`bubbletea` TUI, that can record a traced HTTP request and its Redis dependencies as a
+replayable YAML test case. This is Milestones 1–4 of a larger eBPF traffic-recording
+project — see [Roadmap](#roadmap) for what's deliberately not built yet.
+
+Build notes, bugs, and gotchas encountered along the way (kept for a future write-up, not
+part of this reference doc) are in [`NOTES.md`](NOTES.md).
 
 ## What this does
 
@@ -14,21 +18,46 @@ either to a live terminal UI or as plain text.
 ```
 sudo ./etrace trace --pid <pid>            # interactive TUI (default)
 sudo ./etrace trace --pid <pid> --no-tui   # plain-text stream
+sudo ./etrace record --pid <pid> -o test.yaml   # record one HTTP request + Redis deps as YAML
 ```
 
 The TUI has three tabs (`Tab` to cycle, `q` to quit): **Events** is the flat, timestamped
 syscall log; **Connections** groups them by `(pid, fd)` into one row per socket lifecycle —
 remote endpoint, cumulative bytes out/in, and open/closed state, updating in place rather
 than appending as new activity arrives on that socket; **HTTP** shows one row per decoded
-request/response pair — method, path, status, a body preview, and whether the capture was
-truncated.
+HTTP request/response pair — method, path, status, a body preview, and whether the capture
+was truncated (Redis traffic doesn't get a TUI tab — see Architecture).
+
+`etrace record` runs until `Ctrl-C`, then writes a YAML test case built from what it saw
+during that window — matching the guide's schema:
+
+```yaml
+test:
+    name: recorded-test
+request:
+    method: POST
+    path: /users
+    body:
+        name: Alice
+dependencies:
+    - type: redis
+      request: set user:42 Alice
+      response: OK
+response:
+    status: 201
+    body:
+        id: 42
+        name: Alice
+```
 
 Root (or `CAP_BPF`+`CAP_PERFMON`) is required to load BPF programs.
 
 ## Building
 
 Requires: Go 1.21+, clang/llvm, `libbpf-dev`, `bpftool`, and kernel BTF
-(`/sys/kernel/btf/vmlinux` must exist).
+(`/sys/kernel/btf/vmlinux` must exist). `etrace record`'s Redis decoding only needs a Redis
+instance at trace time (e.g. `redis-server --save "" --appendonly no`, stopped again after
+— this project doesn't install or run Redis as a standing service), not to build or test.
 
 ```
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
@@ -55,20 +84,38 @@ collector.Event  --->  correlator.Run  --->  streamer.Run  --->  tui.Run
 ```
 
 `internal/correlator` groups events into `Connection` snapshots (feeding the Connections
-tab). `internal/streamer` buffers each `(pid, fd)`'s read/write bytes and, on close,
-content-sniffs both directions as HTTP (feeding the HTTP tab). Every stage still forwards
+tab). `internal/streamer` buffers each `(pid, fd)`'s read/write bytes and, on close (or when
+the trace ends — see below), content-sniffs both directions, trying each protocol
+`internal/decoder` supports in turn and keeping whichever parses. Every stage still forwards
 the raw event stream unchanged, which is what keeps the Events tab working all the way
 through the chain. This layering is also what makes the TUI testable headlessly with
 `teatest` (`internal/tui/tui_test.go`): every tab consumes a plain channel, so tests inject
 synthetic values instead of driving a live trace.
 
-The streamer doesn't need `accept()` tracking to identify a traced server's inbound
-sockets: it buffers every fd's bytes regardless of how the socket was established, and
-tries `http.ReadRequest`/`ReadResponse` in **both** role assignments (read=request,
-write=response for a traced HTTP server; the inverse for a traced client), keeping
-whichever parses. The inverse case isn't exercised by anything in v1 yet, but M4 (a traced
-Redis *client*) needs it, so `decode()` was made role-agnostic now rather than revisited
-later.
+`internal/decoder` owns protocol semantics as pure functions over byte slices — no
+channels, no lifecycle — so streamer stays responsible only for buffering. `TryHTTP` tries
+**both** role assignments (read=request/write=response for a traced HTTP server; the
+inverse for a traced client) and keeps whichever parses; `TryRESP` decodes a RESP2 command
+stream, pairs each command with its reply positionally, and filters out connection-setup
+commands (`HELLO`, `CLIENT`, `AUTH`, `SELECT`, `PING`) so a recorded dependency reflects the
+application's actual Redis usage, not the client library's handshake chatter. Neither
+decoder needs `accept()` tracking to identify a traced server's inbound sockets: streamer
+buffers every fd's bytes regardless of how the socket was established, and content alone
+determines what protocol (if any) it's carrying.
+
+`etrace record` chains `collector → streamer` directly (it needs the `Exchange` stream, not
+the TUI's `Connection` view) and calls `internal/recorder.Build` on everything the streamer
+decoded during the trace: the first HTTP exchange observed becomes the recorded
+request/response, every Redis call across every Redis exchange becomes a dependency, in
+order. No time-window matching is needed to tell "the request" from "its dependencies" —
+protocol type alone separates them, which is enough at this project's single-request-at-a-
+time scope (see Known limitations). `internal/storage` is a deliberately generic YAML
+read/write helper with no knowledge of the `TestCase` shape.
+
+Streamer decodes on `close()`, or on whatever's still buffered when the trace ends —
+added for `etrace record`, since connection-pooling clients like `go-redis` never call
+`close()` on a connection they intend to reuse. Without this, Redis traffic would be
+captured perfectly on the wire and then silently produce nothing.
 
 `read()` is captured as an entry+exit pair: the buffer isn't populated until the syscall
 returns, so `sys_enter_read` stashes `{buf, fd}` in a BPF hash map keyed by `pid_tgid`, and
@@ -103,22 +150,33 @@ freed fd must not merge its byte counts or endpoint into the previous connection
 - The streamer buffers up to 64KB per direction per connection; bytes beyond that are
   silently dropped from the buffer (separately from, and in addition to, the per-event 4096
   byte capture cap above).
-- HTTP decoding fires on `close()`, or on whatever's still buffered when the trace ends
-  (added for M4, since pooled clients like go-redis never close their connection) — so a
-  keep-alive/pooled connection now decodes correctly, but only one command/reply pair per
-  connection is recovered this way: multiple pooled requests on the same fd within one
-  trace aren't disentangled. Attaching mid-connection (missing the start of a
+- Decoding fires on `close()`, or on whatever's still buffered when the trace ends (added
+  for M4, since pooled clients like go-redis never close their connection) — so a
+  keep-alive/pooled connection now decodes correctly, but only one request/reply recovered
+  per connection this way: multiple pooled Redis commands on the same fd within one trace
+  aren't disentangled (only the first survives past the earlier commands, since replies are
+  paired positionally against *all* commands sent, including ones from prior pooled uses
+  within the same trace window). Attaching mid-connection (missing the start of a
   request/response) yields a byte stream that won't parse. Both match the guide's
   single-request-at-a-time v1 scope.
+- RESP decoding only implements the RESP2 type set (`+`,`-`,`:`,`$`,`*`) — sufficient
+  because the example app forces `Protocol: 2` on its Redis client, sidestepping RESP3's
+  richer types (maps, null, boolean) entirely. A traced app that negotiates RESP3 and
+  receives a map-typed reply would fail to decode that reply (the command would still be
+  recognized; only reply rendering would fail).
+- `etrace record` only recognizes commands that arrive as RESP arrays of bulk strings
+  (`*N\r\n$...`), which is how every real Redis client sends them — this is a correctness
+  assumption, not a scope cut, but worth knowing if you ever craft RESP by hand.
+- `recorder.Build` records only the *first* HTTP exchange seen per recording and treats
+  every Redis exchange as a dependency of it, with no way to tell "this Redis call belongs
+  to a *different*, later HTTP request" — matches the single-request-at-a-time scope, but
+  means `etrace record` isn't meant to be left running across multiple requests.
 
 ## Roadmap
 
 Not built yet; each is a self-contained follow-on milestone on top of the same
 `collector` → channel → stage → ... → consumer architecture:
 
-- **M4 — Redis (RESP) decoding + recorder**: a minimal RESP parser plus a simple
-  same-PID/time-window heuristic to attribute outbound Redis calls to the inbound HTTP
-  request that triggered them, recorded as YAML test cases.
 - **M5 — Replay engine**: a userspace RESP proxy that serves recorded responses instead of
   a real Redis, so a recorded test case can be replayed with the dependency offline.
 - **TLS uprobes**: `SSL_write`/`SSL_read` uprobes (the `SSL_read` entry+return stash reuses

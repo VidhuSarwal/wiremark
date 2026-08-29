@@ -26,6 +26,10 @@ func Format(ev collector.Event, comm string, t time.Time) string {
 		return fmt.Sprintf("%s READ %d bytes: %q", prefix, ev.DataLen, ev.Payload())
 	case collector.OpClose:
 		return fmt.Sprintf("%s CLOSE", prefix)
+	case collector.OpSSLWrite:
+		return fmt.Sprintf("%s SSL_WRITE(ssl=%#x) %d bytes: %q", prefix, ev.SSLPtr, ev.DataLen, ev.Payload())
+	case collector.OpSSLRead:
+		return fmt.Sprintf("%s SSL_READ(ssl=%#x) %d bytes: %q", prefix, ev.SSLPtr, ev.DataLen, ev.Payload())
 	default:
 		return fmt.Sprintf("%s UNKNOWN(op=%d)", prefix, ev.Operation)
 	}

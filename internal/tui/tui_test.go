@@ -55,6 +55,31 @@ func TestTUIRendersEvent(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 }
 
+// TestTUIRendersSSLEvent guards against the Events tab having its own,
+// separate op-name table from internal/printer's (found live: it rendered
+// SSL_WRITE/SSL_READ as "OP(4)"/"OP(5)" with an empty detail column, even
+// though printer.Format already knew about them -- two independent renderers
+// of the same Operation field, easy for one to drift from the other).
+func TestTUIRendersSSLEvent(t *testing.T) {
+	tm, _, _, _ := newTestModel(t)
+
+	ev := collector.Event{PID: 42, FD: -1, Operation: collector.OpSSLWrite, DataLen: 5, SSLPtr: 0xdead}
+	copy(ev.Data[:], "hello")
+	tm.Send(eventMsg{ev: ev, t: fixedTime})
+
+	teatest.WaitFor(t, tm.Output(), func(out []byte) bool {
+		// The Op column is narrow enough to truncate "SSL_WRITE" -- check
+		// the prefix that survives truncation, plus the decrypted payload
+		// and ssl_ptr identity that only eventDetail (not opName) renders.
+		return bytes.Contains(out, []byte("SSL_WRI")) &&
+			bytes.Contains(out, []byte("ssl=0xdead")) &&
+			bytes.Contains(out, []byte("hello"))
+	}, teatest.WithDuration(2*time.Second))
+
+	tm.Type("q")
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+}
+
 func TestTUIShowsTraceEndedWhenChannelCloses(t *testing.T) {
 	events := make(chan collector.Event)
 	conns := make(chan correlator.Connection)

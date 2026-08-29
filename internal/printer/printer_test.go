@@ -49,6 +49,20 @@ func TestFormat(t *testing.T) {
 			ev:   collector.Event{PID: 1, FD: 0, Operation: 99},
 			want: "[12:31:01.142] PID 1 (myapp) fd=0 UNKNOWN(op=99)",
 		},
+		{
+			name: "ssl write",
+			ev: collector.Event{
+				PID: 18231, FD: -1, Operation: collector.OpSSLWrite, DataLen: 5, SSLPtr: 0xdead,
+			},
+			want: `[12:31:01.142] PID 18231 (myapp) fd=-1 SSL_WRITE(ssl=0xdead) 5 bytes: "hello"`,
+		},
+		{
+			name: "ssl read",
+			ev: collector.Event{
+				PID: 18231, FD: -1, Operation: collector.OpSSLRead, DataLen: 5, SSLPtr: 0xdead,
+			},
+			want: `[12:31:01.142] PID 18231 (myapp) fd=-1 SSL_READ(ssl=0xdead) 5 bytes: "hello"`,
+		},
 	}
 
 	for _, tt := range tests {

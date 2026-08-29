@@ -127,6 +127,10 @@ func opName(op uint32) string {
 		return "READ"
 	case collector.OpClose:
 		return "CLOSE"
+	case collector.OpSSLWrite:
+		return "SSL_WRITE"
+	case collector.OpSSLRead:
+		return "SSL_READ"
 	default:
 		return fmt.Sprintf("OP(%d)", op)
 	}
@@ -138,6 +142,8 @@ func eventDetail(ev collector.Event) string {
 		return "-> " + ev.RemoteAddrString()
 	case collector.OpWrite, collector.OpRead:
 		return fmt.Sprintf("%d bytes: %q", ev.DataLen, ev.Payload())
+	case collector.OpSSLWrite, collector.OpSSLRead:
+		return fmt.Sprintf("ssl=%#x %d bytes: %q", ev.SSLPtr, ev.DataLen, ev.Payload())
 	default:
 		return ""
 	}

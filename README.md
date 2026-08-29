@@ -96,16 +96,20 @@ freed fd must not merge its byte counts or endpoint into the previous connection
   streamer (HTTP tab) doesn't have this limitation, since it doesn't need `connect()`/
   `accept()` at all; it content-sniffs whatever bytes flow on any fd.
 - A process that dies without calling `close()` (e.g. killed) leaves its connections shown
-  as still-open in the Connections tab, and any in-flight HTTP exchange on that fd is never
-  decoded (the streamer only attempts a parse on close). Not worth adding
-  `sched_process_exit`-based cleanup for either yet — tracked state per connection is small.
+  as still-open in the Connections tab (the correlator only reacts to `close()`; not worth
+  adding `sched_process_exit`-based cleanup yet — tracked state per connection is small).
+  The streamer doesn't have this gap: it decodes on `close()` *or* when the trace ends,
+  whichever comes first (see below), so an in-flight/pooled connection is still decoded.
 - The streamer buffers up to 64KB per direction per connection; bytes beyond that are
   silently dropped from the buffer (separately from, and in addition to, the per-event 4096
   byte capture cap above).
-- HTTP decoding only fires once, on `close()`, for a whole connection's buffered bytes. A
-  keep-alive connection that's still open when the trace ends produces no HTTP tab row, and
-  attaching mid-connection (missing the start of a request/response) yields a byte stream
-  that won't parse. Both match the guide's single-request-at-a-time v1 scope.
+- HTTP decoding fires on `close()`, or on whatever's still buffered when the trace ends
+  (added for M4, since pooled clients like go-redis never close their connection) — so a
+  keep-alive/pooled connection now decodes correctly, but only one command/reply pair per
+  connection is recovered this way: multiple pooled requests on the same fd within one
+  trace aren't disentangled. Attaching mid-connection (missing the start of a
+  request/response) yields a byte stream that won't parse. Both match the guide's
+  single-request-at-a-time v1 scope.
 
 ## Roadmap
 

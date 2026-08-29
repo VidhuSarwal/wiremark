@@ -157,6 +157,19 @@ func Run(events <-chan collector.Event) (rawOut <-chan collector.Event, exchange
 				}
 			}
 		}
+
+		// Flush whatever's left when the trace ends: a pooled client
+		// connection (e.g. go-redis) is never closed, so without this a
+		// buffer that never saw OpClose would be silently discarded and
+		// its traffic would never be decoded. This also retroactively
+		// covers M3's documented keep-alive-connection limitation. Scoped
+		// to one command/reply pair per connection -- multiple pooled
+		// commands on the same fd within one trace aren't disentangled.
+		for k, b := range bufs {
+			if ex, ok := decode(k.pid, k.fd, b.read, b.write, b.truncated); ok {
+				out <- ex
+			}
+		}
 	}()
 
 	return raw, out

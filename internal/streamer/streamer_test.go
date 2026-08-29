@@ -125,6 +125,33 @@ func TestRunEmitsExchangeOnClose(t *testing.T) {
 	}
 }
 
+// TestRunFlushesOnChannelCloseWithoutOpClose guards the pooling fix: a
+// connection that's never explicitly closed (e.g. go-redis pooling a
+// connection) must still be decoded when the trace ends, not silently
+// dropped.
+func TestRunFlushesOnChannelCloseWithoutOpClose(t *testing.T) {
+	events := make(chan collector.Event, 8)
+	events <- eventFor(1, 5, collector.OpRead, capturedRequest)
+	events <- eventFor(1, 5, collector.OpWrite, capturedResponse)
+	// No OpClose -- the events channel just closes, as if the trace ended
+	// while this connection was still open/pooled.
+	close(events)
+
+	rawOut, exchanges := Run(events)
+	go func() {
+		for range rawOut {
+		}
+	}()
+
+	ex, ok := <-exchanges
+	if !ok {
+		t.Fatal("no Exchange emitted on trace end for a connection that never saw OpClose")
+	}
+	if ex.Request == nil || ex.Request.URL.Path != "/medium" {
+		t.Errorf("Exchange.Request = %+v, want GET /medium", ex.Request)
+	}
+}
+
 func TestRunPassesThroughEveryEvent(t *testing.T) {
 	events := make(chan collector.Event, 3)
 	events <- eventFor(1, 5, collector.OpRead, "x")

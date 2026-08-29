@@ -65,12 +65,34 @@ func TestDecodeEventTruncatedRecord(t *testing.T) {
 
 func TestEventStructSizeMatchesCStruct(t *testing.T) {
 	// bpf/types.h's struct event: pid+tid (8) + timestamp (8) + fd+op+ret
-	// (12) + remote_addr (4) + remote_port (2) + 2-byte pad + total_len (4)
-	// + data_len (4) + data[4096] = 4140, rounded up to 4144 for the
-	// struct's 8-byte alignment (from the __u64 timestamp).
-	const wantSize = 4144
+	// (12), padded 4 bytes to align ssl_ptr (8) on an 8-byte boundary (28
+	// -> 32) + remote_addr (4) + remote_port (2) + 2-byte pad + total_len
+	// (4) + data_len (4) + data[4096] = 4152, already an 8-byte multiple
+	// (no trailing padding needed) -- checked against a real C compilation
+	// of the struct via offsetof() while adding ssl_ptr for TLS uprobes.
+	const wantSize = 4152
 	if got := len(encodeEvent(t, Event{})); got != wantSize {
 		t.Fatalf("encoded Event size = %d bytes, want %d (must match bpf/types.h's struct event)", got, wantSize)
+	}
+}
+
+func TestDecodeEventSSLReadRoundTrip(t *testing.T) {
+	want := Event{
+		PID:       42,
+		FD:        -1, // no fd is recoverable in-kernel from an SSL* alone
+		Operation: OpSSLRead,
+		SSLPtr:    0xdeadbeefcafe,
+		TotalLen:  5,
+		DataLen:   5,
+	}
+	copy(want.Data[:], "hello")
+
+	got, err := decodeEvent(encodeEvent(t, want))
+	if err != nil {
+		t.Fatalf("decodeEvent: %v", err)
+	}
+	if got.SSLPtr != want.SSLPtr || got.FD != -1 || string(got.Payload()) != "hello" {
+		t.Fatalf("decodeEvent round trip mismatch:\n got:  %+v\n want: %+v", got, want)
 	}
 }
 

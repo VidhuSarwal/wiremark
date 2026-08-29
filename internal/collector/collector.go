@@ -17,10 +17,12 @@ import (
 )
 
 const (
-	OpConnect uint32 = 0
-	OpRead    uint32 = 1
-	OpWrite   uint32 = 2
-	OpClose   uint32 = 3
+	OpConnect  uint32 = 0
+	OpRead     uint32 = 1
+	OpWrite    uint32 = 2
+	OpClose    uint32 = 3
+	OpSSLWrite uint32 = 4
+	OpSSLRead  uint32 = 5
 )
 
 // dataCap must match bpf/types.h's DATA_CAP.
@@ -28,19 +30,21 @@ const dataCap = 4096
 
 // Event mirrors bpf/types.h's struct event.
 type Event struct {
-	PID        uint32
-	TID        uint32
-	Timestamp  uint64
-	FD         int32
-	Operation  uint32
-	Ret        int32
+	PID       uint32
+	TID       uint32
+	Timestamp uint64
+	FD        int32 // -1 for OpSSLWrite/OpSSLRead; see SSLPtr
+	Operation uint32
+	Ret       int32
+	_         uint32 // padding: ret ends at offset 28, SSLPtr needs 8-byte alignment
+	SSLPtr    uint64 // SSL* identity, valid for OpSSLWrite/OpSSLRead; 0 otherwise
+
 	RemoteAddr uint32
 	RemotePort uint16
 	_          uint16 // padding to match C struct layout
-	TotalLen   uint32 // true byte count for OpRead/OpWrite; may exceed DataLen
+	TotalLen   uint32 // true byte count for OpRead/OpWrite/OpSSL*; may exceed DataLen
 	DataLen    uint32 // captured (possibly truncated) length of Data
 	Data       [dataCap]byte
-	_          [4]byte // trailing padding to match the C struct's 8-byte alignment
 }
 
 // Payload returns the captured bytes for a read/write event. Truncated

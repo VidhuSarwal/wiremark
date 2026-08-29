@@ -11,6 +11,7 @@ require (
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.43.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -39,5 +40,4 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

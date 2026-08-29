@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -77,9 +78,16 @@ func FormatIPv4Port(addr uint32, port uint16) string {
 // Collector loads the BPF programs, attaches them, and streams decoded
 // events on a channel. It never touches the terminal.
 type Collector struct {
+	pid   uint32
 	objs  bpfgen.SyscallObjects
 	links []link.Link
 	rd    *ringbuf.Reader
+
+	// tlsObjs/tlsRd are only populated if EnableTLS succeeds -- TLS uprobes
+	// are opt-in, not attached by New.
+	tlsEnabled bool
+	tlsObjs    bpfgen.TlsObjects
+	tlsRd      *ringbuf.Reader
 
 	// monoRefNs/wallRef let EventTime convert a BPF event's boot-relative
 	// bpf_ktime_get_ns() timestamp into a wall-clock time.Time.
@@ -125,6 +133,7 @@ func New(pid uint32) (*Collector, error) {
 	}
 
 	c := &Collector{
+		pid:       pid,
 		objs:      objs,
 		monoRefNs: uint64(ts.Sec)*1e9 + uint64(ts.Nsec),
 		wallRef:   time.Now(),
@@ -159,6 +168,71 @@ func New(pid uint32) (*Collector, error) {
 	return c, nil
 }
 
+// EnableTLS attaches SSL_write/SSL_read uprobes against the traced process's
+// own loaded libssl (resolved from /proc/<pid>/maps, so it works whether the
+// process linked the system OpenSSL or a bundled one), scoped to pid both
+// in-kernel (target_pid, same guard as the syscall programs) and at attach
+// time (link.UprobeOptions.PID) -- uprobes support PID-scoped attachment
+// directly, which is stronger than the syscall tracepoints' guard-clause-only
+// approach, since a mismatched call in another process never even reaches
+// this program to be checked. Must be called after New and before Run; TLS
+// tracing is opt-in and not attached by New.
+func (c *Collector) EnableTLS() error {
+	libssl, err := findMappedLibrary(c.pid, "libssl.so")
+	if err != nil {
+		return fmt.Errorf("find libssl: %w", err)
+	}
+
+	spec, err := bpfgen.LoadTls()
+	if err != nil {
+		return fmt.Errorf("load tls bpf spec: %w", err)
+	}
+	if err := spec.Variables["target_pid"].Set(c.pid); err != nil {
+		return fmt.Errorf("set tls target_pid: %w", err)
+	}
+	if err := spec.LoadAndAssign(&c.tlsObjs, nil); err != nil {
+		return fmt.Errorf("load tls bpf objects: %w", err)
+	}
+	c.tlsEnabled = true
+
+	ex, err := link.OpenExecutable(libssl)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", libssl, err)
+	}
+
+	opts := &link.UprobeOptions{PID: int(c.pid)}
+	uprobes := []struct {
+		symbol string
+		prog   *ebpf.Program
+		ret    bool
+	}{
+		{"SSL_write", c.tlsObjs.TraceSslWrite, false},
+		{"SSL_read", c.tlsObjs.TraceSslReadEnter, false},
+		{"SSL_read", c.tlsObjs.TraceSslReadExit, true},
+	}
+	for _, u := range uprobes {
+		var l link.Link
+		var err error
+		if u.ret {
+			l, err = ex.Uretprobe(u.symbol, u.prog, opts)
+		} else {
+			l, err = ex.Uprobe(u.symbol, u.prog, opts)
+		}
+		if err != nil {
+			return fmt.Errorf("attach uprobe %s (ret=%v): %w", u.symbol, u.ret, err)
+		}
+		c.links = append(c.links, l)
+	}
+
+	rd, err := ringbuf.NewReader(c.tlsObjs.Events)
+	if err != nil {
+		return fmt.Errorf("open tls ringbuf reader: %w", err)
+	}
+	c.tlsRd = rd
+
+	return nil
+}
+
 // decodeEvent decodes a raw ring buffer record into an Event. The field
 // order and padding must match bpf/types.h's struct event exactly.
 func decodeEvent(raw []byte) (Event, error) {
@@ -167,43 +241,70 @@ func decodeEvent(raw []byte) (Event, error) {
 	return ev, err
 }
 
-// Run reads the ring buffer until the reader is closed (via Close) or an
-// unrecoverable error occurs, publishing decoded events on the returned
-// channel. The channel is closed when Run returns.
+// readLoop reads one ring buffer until it's closed or an unrecoverable error
+// occurs, publishing decoded events onto the shared events/errs channels.
+func readLoop(rd *ringbuf.Reader, events chan<- Event, errs chan<- error) {
+	for {
+		record, err := rd.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
+			errs <- fmt.Errorf("read ringbuf: %w", err)
+			return
+		}
+
+		ev, err := decodeEvent(record.RawSample)
+		if err != nil {
+			errs <- fmt.Errorf("decode event: %w", err)
+			continue
+		}
+		events <- ev
+	}
+}
+
+// Run reads the ring buffer(s) -- the syscall one always, plus the TLS one
+// too if EnableTLS was called -- until Close or an unrecoverable error,
+// publishing decoded events on the returned channel. Both channels close
+// once every ring buffer's reader has returned.
 func (c *Collector) Run() (<-chan Event, <-chan error) {
 	events := make(chan Event, 64)
 	errs := make(chan error, 1)
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		defer close(events)
-		defer close(errs)
-		for {
-			record, err := c.rd.Read()
-			if err != nil {
-				if errors.Is(err, ringbuf.ErrClosed) {
-					return
-				}
-				errs <- fmt.Errorf("read ringbuf: %w", err)
-				return
-			}
+		defer wg.Done()
+		readLoop(c.rd, events, errs)
+	}()
 
-			ev, err := decodeEvent(record.RawSample)
-			if err != nil {
-				errs <- fmt.Errorf("decode event: %w", err)
-				continue
-			}
-			events <- ev
-		}
+	if c.tlsEnabled {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			readLoop(c.tlsRd, events, errs)
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(events)
+		close(errs)
 	}()
 
 	return events, errs
 }
 
-// Close releases all BPF resources (links, maps, programs, ringbuf reader).
+// Close releases all BPF resources (links, maps, programs, ringbuf readers).
 func (c *Collector) Close() error {
 	var firstErr error
 	if c.rd != nil {
 		if err := c.rd.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if c.tlsRd != nil {
+		if err := c.tlsRd.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -214,6 +315,11 @@ func (c *Collector) Close() error {
 	}
 	if err := c.objs.Close(); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if c.tlsEnabled {
+		if err := c.tlsObjs.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	return firstErr
 }

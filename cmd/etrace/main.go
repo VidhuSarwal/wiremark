@@ -37,6 +37,7 @@ func rootCmd() *cobra.Command {
 func traceCmd() *cobra.Command {
 	var pid int
 	var noTUI bool
+	var tls bool
 
 	cmd := &cobra.Command{
 		Use:   "trace",
@@ -51,6 +52,12 @@ func traceCmd() *cobra.Command {
 				return fmt.Errorf("start collector: %w", err)
 			}
 			defer c.Close()
+
+			if tls {
+				if err := c.EnableTLS(); err != nil {
+					return fmt.Errorf("enable TLS uprobes: %w", err)
+				}
+			}
 
 			events, errs := c.Run()
 			go func() {
@@ -72,6 +79,7 @@ func traceCmd() *cobra.Command {
 
 	cmd.Flags().IntVar(&pid, "pid", 0, "PID to trace (required)")
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "print plain-text events instead of launching the TUI")
+	cmd.Flags().BoolVar(&tls, "tls", false, "also attach SSL_write/SSL_read uprobes to capture TLS plaintext (requires the target to link libssl)")
 	return cmd
 }
 

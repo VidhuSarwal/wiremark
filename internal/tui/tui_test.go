@@ -12,6 +12,7 @@ import (
 
 	"github.com/vidhu/etracer/internal/collector"
 	"github.com/vidhu/etracer/internal/correlator"
+	"github.com/vidhu/etracer/internal/decoder"
 	"github.com/vidhu/etracer/internal/streamer"
 )
 
@@ -163,9 +164,12 @@ func TestTUIHTTPTabRendersExchange(t *testing.T) {
 	}
 	exchanges <- streamer.Exchange{
 		PID: 42, FD: 7,
-		Request:      req,
-		Response:     &http.Response{StatusCode: 200},
-		ResponseBody: []byte(`{"id":42}`),
+		Protocol: streamer.ProtocolHTTP,
+		HTTP: &decoder.HTTPExchange{
+			Request:      req,
+			Response:     &http.Response{StatusCode: 200},
+			ResponseBody: []byte(`{"id":42}`),
+		},
 	}
 
 	teatest.WaitFor(t, tm.Output(), func(out []byte) bool {
@@ -181,7 +185,7 @@ func TestTUIHTTPTabRendersExchange(t *testing.T) {
 func TestTUIHTTPTabTruncatedMarker(t *testing.T) {
 	m := newModel(nil, nil, nil, func(collector.Event) time.Time { return fixedTime })
 
-	next, _ := m.Update(httpMsg(streamer.Exchange{PID: 1, FD: 1, Truncated: true}))
+	next, _ := m.Update(httpMsg(streamer.Exchange{PID: 1, FD: 1, Protocol: streamer.ProtocolHTTP, Truncated: true}))
 	m = next.(Model)
 
 	if len(m.http.rows) != 1 {

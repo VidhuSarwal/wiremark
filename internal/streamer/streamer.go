@@ -1,89 +1,57 @@
 // Package streamer assembles per-(pid,fd) byte streams from the raw Event
-// stream and content-sniffs them as HTTP. It deliberately doesn't need
-// accept() tracking: it buffers every fd's read/write bytes regardless of
-// how the socket was established, and on close tries to parse each side as
-// an HTTP request or response, keeping whichever succeeds. Trying both
-// directions (not just read=request/write=response) is what lets this work
-// for both a traced HTTP server (M3) and a traced Redis client (M4), where
-// the roles are reversed.
+// stream and content-sniffs them via internal/decoder. It deliberately
+// doesn't need accept() tracking: it buffers every fd's read/write bytes
+// regardless of how the socket was established, and on close (or when the
+// trace ends, for connections that are never explicitly closed -- see Run)
+// tries each supported protocol in turn, keeping whichever parses.
 package streamer
 
 import (
-	"bufio"
-	"bytes"
-	"io"
-	"net/http"
-
 	"github.com/vidhu/etracer/internal/collector"
+	"github.com/vidhu/etracer/internal/decoder"
 )
 
-// Exchange is a decoded HTTP request/response pair assembled from one
-// connection's lifetime. Request and/or Response may be nil if only one
-// side parsed as HTTP.
+// Protocol identifies what a decoded Exchange turned out to be.
+type Protocol int
+
+const (
+	ProtocolUnknown Protocol = iota
+	ProtocolHTTP
+	ProtocolRedis
+)
+
+// Exchange is a decoded request/response pair assembled from one
+// connection's lifetime. Exactly one of HTTP or Redis is populated,
+// according to Protocol.
 type Exchange struct {
-	PID          uint32
-	FD           int32
-	Request      *http.Request
-	RequestBody  []byte
-	Response     *http.Response
-	ResponseBody []byte
+	PID      uint32
+	FD       int32
+	Protocol Protocol
+	HTTP     *decoder.HTTPExchange
+	Redis    []decoder.RedisCall
 	// Truncated is set if any contributing event's payload was cut short by
 	// the capture buffer cap -- the parse may have succeeded on incomplete
 	// data (e.g. a short body) rather than failed outright.
 	Truncated bool
 }
 
-func parseRequest(buf []byte) *http.Request {
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(buf)))
-	if err != nil {
-		return nil
-	}
-	return req
-}
-
-func parseResponse(buf []byte, req *http.Request) *http.Response {
-	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(buf)), req)
-	if err != nil {
-		return nil
-	}
-	return resp
-}
-
-func readBody(r io.Reader) []byte {
-	body, _ := io.ReadAll(r) // best-effort: a short/incomplete body is kept as-is, not an error
-	return body
-}
-
-// decode content-sniffs readBuf/writeBuf as HTTP, trying both possible
-// role assignments and keeping whichever parses a request. Returns
-// ok=false if neither side parsed as anything HTTP-shaped.
+// decode content-sniffs readBuf/writeBuf, trying HTTP first and then RESP
+// (write=command/read=reply -- the only realistic role for a Redis client).
+// Returns ok=false if neither protocol recognized the bytes.
 func decode(pid uint32, fd int32, readBuf, writeBuf []byte, truncated bool) (Exchange, bool) {
 	ex := Exchange{PID: pid, FD: fd, Truncated: truncated}
 
-	req, reqFromRead := parseRequest(readBuf), true
-	if req == nil {
-		req, reqFromRead = parseRequest(writeBuf), false
+	if httpEx, ok := decoder.TryHTTP(readBuf, writeBuf); ok {
+		ex.Protocol = ProtocolHTTP
+		ex.HTTP = &httpEx
+		return ex, true
 	}
-
-	respBuf := writeBuf
-	if !reqFromRead {
-		respBuf = readBuf
+	if calls, ok := decoder.TryRESP(writeBuf, readBuf); ok {
+		ex.Protocol = ProtocolRedis
+		ex.Redis = calls
+		return ex, true
 	}
-	resp := parseResponse(respBuf, req)
-
-	if req == nil && resp == nil {
-		return ex, false
-	}
-
-	if req != nil {
-		ex.Request = req
-		ex.RequestBody = readBody(req.Body)
-	}
-	if resp != nil {
-		ex.Response = resp
-		ex.ResponseBody = readBody(resp.Body)
-	}
-	return ex, true
+	return ex, false
 }
 
 // bufCap bounds memory per connection per direction; bytes beyond this are
@@ -114,8 +82,10 @@ func appendCapped(dst *[]byte, add []byte) {
 
 // Run consumes events (becoming its sole receiver) and returns two
 // channels: rawOut passes every event through unchanged, and exchanges
-// emits a decoded Exchange each time a connection with HTTP-shaped traffic
-// closes. Both channels close when events closes.
+// emits a decoded Exchange each time a connection with recognized traffic
+// closes -- or, for a connection never explicitly closed (e.g. a pooled
+// client connection), when the trace ends. Both channels close when events
+// closes.
 func Run(events <-chan collector.Event) (rawOut <-chan collector.Event, exchanges <-chan Exchange) {
 	raw := make(chan collector.Event, 64)
 	out := make(chan Exchange, 16)

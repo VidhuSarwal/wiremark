@@ -8,63 +8,50 @@ import (
 	"github.com/vidhu/etracer/internal/collector"
 )
 
-// These are the literal byte strings captured from a live trace of
-// examples/go-http-app (see the M3 capture-fidelity commit): a real
-// GET /medium request and its 1533-byte JSON response. This is the gate for
-// the whole milestone -- if decode() can't parse actual captured bytes,
-// nothing built on top of it matters.
+// Same literal captured bytes used in internal/decoder's gate tests --
+// duplicated here (not imported) since these test streamer's own
+// responsibility (buffering/lifecycle/flush), not decode correctness.
 const capturedRequest = "GET /medium HTTP/1.1\r\nHost: 127.0.0.1:18099\r\nUser-Agent: curl/8.18.0\r\nAccept: */*\r\n\r\n"
 
-// capturedBody mirrors examples/go-http-app's /medium handler exactly
-// (bio: strings.Repeat("y", 1500)) so its length is derived, not guessed.
 var capturedBody = `{"id":42,"name":"Alice","bio":"` + strings.Repeat("y", 1500) + `"}`
 
 var capturedResponse = "HTTP/1.1 200 OK\r\nDate: Sat, 29 Aug 2026 18:25:02 GMT\r\n" +
 	"Content-Length: " + strconv.Itoa(len(capturedBody)) + "\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" +
 	capturedBody
 
-func TestDecodeRealCapturedBytesServerRole(t *testing.T) {
+const capturedSetCommand = "*3\r\n$3\r\nset\r\n$7\r\nuser:42\r\n$5\r\nAlice\r\n"
+const capturedOKReply = "+OK\r\n"
+
+func TestDecodeRecognizesHTTP(t *testing.T) {
 	ex, ok := decode(42, 5, []byte(capturedRequest), []byte(capturedResponse), false)
 	if !ok {
 		t.Fatal("decode() failed to recognize real captured HTTP bytes")
 	}
-	if ex.Request == nil {
-		t.Fatal("Request is nil")
+	if ex.Protocol != ProtocolHTTP {
+		t.Fatalf("Protocol = %v, want ProtocolHTTP", ex.Protocol)
 	}
-	if ex.Request.Method != "GET" || ex.Request.URL.Path != "/medium" {
-		t.Errorf("Request = %s %s, want GET /medium", ex.Request.Method, ex.Request.URL.Path)
-	}
-	if ex.Response == nil {
-		t.Fatal("Response is nil")
-	}
-	if ex.Response.StatusCode != 200 {
-		t.Errorf("StatusCode = %d, want 200", ex.Response.StatusCode)
-	}
-	if len(ex.ResponseBody) != len(capturedBody) {
-		t.Errorf("ResponseBody length = %d, want %d", len(ex.ResponseBody), len(capturedBody))
+	if ex.HTTP == nil || ex.HTTP.Request == nil || ex.HTTP.Request.URL.Path != "/medium" {
+		t.Errorf("HTTP = %+v, want a GET /medium request", ex.HTTP)
 	}
 }
 
-// TestDecodeClientRole is the M4-facing case: the traced process is the
-// client, so it *writes* the request and *reads* the response -- the
-// opposite of the server role above. decode() must try both directions.
-func TestDecodeClientRole(t *testing.T) {
-	ex, ok := decode(42, 5, []byte(capturedResponse), []byte(capturedRequest), false)
+func TestDecodeRecognizesRedis(t *testing.T) {
+	ex, ok := decode(42, 8, []byte(capturedOKReply), []byte(capturedSetCommand), false)
 	if !ok {
-		t.Fatal("decode() failed on the client-role byte assignment (write=request, read=response)")
+		t.Fatal("decode() failed to recognize real captured RESP bytes")
 	}
-	if ex.Request == nil || ex.Request.Method != "GET" {
-		t.Error("Request not recovered from the write-side buffer")
+	if ex.Protocol != ProtocolRedis {
+		t.Fatalf("Protocol = %v, want ProtocolRedis", ex.Protocol)
 	}
-	if ex.Response == nil || ex.Response.StatusCode != 200 {
-		t.Error("Response not recovered from the read-side buffer")
+	if len(ex.Redis) != 1 || ex.Redis[0].Reply != "OK" {
+		t.Errorf("Redis = %+v, want one call with reply OK", ex.Redis)
 	}
 }
 
-func TestDecodeNonHTTPBytesFails(t *testing.T) {
-	_, ok := decode(1, 1, []byte("not http\r\n\r\n"), []byte("also not http"), false)
+func TestDecodeNonProtocolBytesFails(t *testing.T) {
+	_, ok := decode(1, 1, []byte("not a protocol\r\n\r\n"), []byte("also not one"), false)
 	if ok {
-		t.Fatal("decode() should not recognize non-HTTP bytes")
+		t.Fatal("decode() should not recognize unrecognized bytes")
 	}
 }
 
@@ -113,11 +100,8 @@ func TestRunEmitsExchangeOnClose(t *testing.T) {
 	if !ok {
 		t.Fatal("no Exchange emitted on close")
 	}
-	if ex.Request == nil || ex.Request.URL.Path != "/medium" {
-		t.Errorf("Exchange.Request = %+v, want GET /medium", ex.Request)
-	}
-	if ex.Response == nil || ex.Response.StatusCode != 200 {
-		t.Errorf("Exchange.Response = %+v, want 200", ex.Response)
+	if ex.HTTP == nil || ex.HTTP.Request == nil || ex.HTTP.Request.URL.Path != "/medium" {
+		t.Errorf("Exchange.HTTP = %+v, want GET /medium", ex.HTTP)
 	}
 
 	if _, ok := <-exchanges; ok {
@@ -125,16 +109,16 @@ func TestRunEmitsExchangeOnClose(t *testing.T) {
 	}
 }
 
-// TestRunFlushesOnChannelCloseWithoutOpClose guards the pooling fix: a
+// TestRunFlushesOnChannelCloseWithoutOpClose guards the M4 pooling fix: a
 // connection that's never explicitly closed (e.g. go-redis pooling a
 // connection) must still be decoded when the trace ends, not silently
 // dropped.
 func TestRunFlushesOnChannelCloseWithoutOpClose(t *testing.T) {
 	events := make(chan collector.Event, 8)
-	events <- eventFor(1, 5, collector.OpRead, capturedRequest)
-	events <- eventFor(1, 5, collector.OpWrite, capturedResponse)
+	events <- eventFor(1, 8, collector.OpWrite, capturedSetCommand)
+	events <- eventFor(1, 8, collector.OpRead, capturedOKReply)
 	// No OpClose -- the events channel just closes, as if the trace ended
-	// while this connection was still open/pooled.
+	// while this pooled connection was still open.
 	close(events)
 
 	rawOut, exchanges := Run(events)
@@ -147,8 +131,8 @@ func TestRunFlushesOnChannelCloseWithoutOpClose(t *testing.T) {
 	if !ok {
 		t.Fatal("no Exchange emitted on trace end for a connection that never saw OpClose")
 	}
-	if ex.Request == nil || ex.Request.URL.Path != "/medium" {
-		t.Errorf("Exchange.Request = %+v, want GET /medium", ex.Request)
+	if ex.Protocol != ProtocolRedis || len(ex.Redis) != 1 {
+		t.Fatalf("Exchange = %+v, want a single decoded Redis call", ex)
 	}
 }
 

@@ -282,12 +282,18 @@ func (m httpTab) init() tea.Cmd {
 func (m httpTab) update(msg tea.Msg) (httpTab, tea.Cmd) {
 	switch msg := msg.(type) {
 	case httpMsg:
-		m.rows = append(m.rows, httpRow(streamer.Exchange(msg)))
-		if len(m.rows) > maxRows {
-			m.rows = m.rows[len(m.rows)-maxRows:]
+		ex := streamer.Exchange(msg)
+		// This tab only shows HTTP exchanges -- Redis dependencies are
+		// M4's `etrace record` output, not a TUI view (a live table isn't
+		// the right shape for "the app's Redis calls during this trace").
+		if ex.Protocol == streamer.ProtocolHTTP {
+			m.rows = append(m.rows, httpRow(ex))
+			if len(m.rows) > maxRows {
+				m.rows = m.rows[len(m.rows)-maxRows:]
+			}
+			m.table.SetRows(m.rows)
+			m.table.GotoBottom()
 		}
-		m.table.SetRows(m.rows)
-		m.table.GotoBottom()
 		return m, waitForExchange(m.exchanges)
 	case httpClosedMsg:
 		m.closed = true
@@ -307,15 +313,16 @@ func (m httpTab) view(footer string) string {
 
 func httpRow(ex streamer.Exchange) table.Row {
 	method, path := "-", "-"
-	if ex.Request != nil {
-		method = ex.Request.Method
-		path = ex.Request.URL.Path
+	var body []byte
+	if ex.HTTP != nil && ex.HTTP.Request != nil {
+		method = ex.HTTP.Request.Method
+		path = ex.HTTP.Request.URL.Path
+		body = ex.HTTP.RequestBody
 	}
 	status := "-"
-	body := ex.RequestBody
-	if ex.Response != nil {
-		status = fmt.Sprintf("%d", ex.Response.StatusCode)
-		body = ex.ResponseBody
+	if ex.HTTP != nil && ex.HTTP.Response != nil {
+		status = fmt.Sprintf("%d", ex.HTTP.Response.StatusCode)
+		body = ex.HTTP.ResponseBody
 	}
 	preview := string(body)
 	if len(preview) > 37 {

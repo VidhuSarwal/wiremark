@@ -4,17 +4,23 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	// Protocol: 2 forces RESP2 and skips the HELLO/RESP3 handshake, which
-	// keeps the wire traffic to plain commands/replies -- the guide's own
-	// stated v1 scope ("just enough to decode common commands, not the
-	// full RESP3 spec").
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", Protocol: 2})
+	// go-redis always sends HELLO to negotiate protocol version (confirmed
+	// by reading its initConn source while building the M5 replay proxy,
+	// which has to answer that handshake itself) -- Protocol: 2 only
+	// controls *which* version HELLO requests, keeping the negotiated
+	// reply types to RESP2's, which is all internal/decoder implements.
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "127.0.0.1:6379"
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, Protocol: 2})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "hello")

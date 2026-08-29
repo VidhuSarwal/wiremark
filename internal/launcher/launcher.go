@@ -141,17 +141,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// filter, not quit the whole launcher -- only treat it as
 			// "quit" when nothing is capturing it for that purpose.
 			if m.stage == stageTarget && m.procList.FilterState() == list.Filtering {
-				var cmd tea.Cmd
-				m.procList, cmd = m.procList.Update(msg)
-				return m, cmd
+				break // fall through to the generic forward below
 			}
 			m.stage = stageQuit
 			return m, tea.Quit
-		}
 
-		switch m.stage {
-		case stageMode:
-			if msg.String() == "enter" {
+		case "enter":
+			switch m.stage {
+			case stageMode:
 				item, ok := m.modeList.SelectedItem().(modeItem)
 				if !ok {
 					return m, nil
@@ -168,13 +165,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.stage = stageYAML
 				}
 				return m, nil
-			}
-			var cmd tea.Cmd
-			m.modeList, cmd = m.modeList.Update(msg)
-			return m, cmd
 
-		case stageTarget:
-			if msg.String() == "enter" && m.procList.FilterState() != list.Filtering {
+			case stageTarget:
+				// While the user is still typing a filter query, Enter
+				// applies the filter (list's own job, via the forward
+				// below) rather than confirming a selection.
+				if m.procList.FilterState() == list.Filtering {
+					break
+				}
 				item, ok := m.procList.SelectedItem().(procItem)
 				if !ok {
 					return m, nil
@@ -191,13 +189,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.result = Result{Args: traceArgs(m.mode, m.pid), NeedsSudo: true}
 				m.stage = stageDone
 				return m, tea.Quit
-			}
-			var cmd tea.Cmd
-			m.procList, cmd = m.procList.Update(msg)
-			return m, cmd
 
-		case stageOutput:
-			if msg.String() == "enter" {
+			case stageOutput:
 				out := strings.TrimSpace(m.textIn.Value())
 				if out == "" {
 					return m, nil
@@ -208,13 +201,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.stage = stageDone
 				return m, tea.Quit
-			}
-			var cmd tea.Cmd
-			m.textIn, cmd = m.textIn.Update(msg)
-			return m, cmd
 
-		case stageYAML:
-			if msg.String() == "enter" {
+			case stageYAML:
 				path := strings.TrimSpace(m.textIn.Value())
 				if path == "" {
 					return m, nil
@@ -224,13 +212,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textIn.Placeholder = "command to run, e.g. ./your-app"
 				m.stage = stageCommand
 				return m, nil
-			}
-			var cmd tea.Cmd
-			m.textIn, cmd = m.textIn.Update(msg)
-			return m, cmd
 
-		case stageCommand:
-			if msg.String() == "enter" {
+			case stageCommand:
 				cmdLine := strings.TrimSpace(m.textIn.Value())
 				if cmdLine == "" {
 					return m, nil
@@ -240,12 +223,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = stageDone
 				return m, tea.Quit
 			}
-			var cmd tea.Cmd
-			m.textIn, cmd = m.textIn.Update(msg)
-			return m, cmd
 		}
 	}
-	return m, nil
+
+	// Everything not handled above -- list navigation keys, filter-query
+	// runes, and message types this model has no opinion on at all (list's
+	// async filter-match results, textinput's cursor-blink ticks, etc.) --
+	// goes to whichever component is currently active. An early version of
+	// this only forwarded tea.KeyMsg/tea.WindowSizeMsg explicitly, which
+	// silently dropped list's own internal filter-result message and left
+	// typed filter queries never actually narrowing the list.
+	var cmd tea.Cmd
+	switch m.stage {
+	case stageMode:
+		m.modeList, cmd = m.modeList.Update(msg)
+	case stageTarget:
+		m.procList, cmd = m.procList.Update(msg)
+	case stageOutput, stageYAML, stageCommand:
+		m.textIn, cmd = m.textIn.Update(msg)
+	}
+	return m, cmd
 }
 
 func (m model) View() string {

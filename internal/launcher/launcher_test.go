@@ -129,6 +129,34 @@ func TestLauncherRunFlow(t *testing.T) {
 	}
 }
 
+// TestLauncherProcessFilterNarrowsList guards a real bug found live: an
+// earlier version of Update() only forwarded tea.KeyMsg/tea.WindowSizeMsg to
+// the active component, silently dropping list.Model's own internal
+// filter-match-result message. Typing into the filter box worked (it's key
+// events), but the visible list never actually narrowed -- confirming a
+// selection after filtering would silently pick whatever the cursor was
+// already on, not what the user filtered for.
+func TestLauncherProcessFilterNarrowsList(t *testing.T) {
+	m := newModel([]Process{
+		{PID: 1, Comm: "systemd"},
+		{PID: 5678, Comm: "myapp"},
+		{PID: 999, Comm: "other"},
+	}, "test.yaml")
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 30))
+
+	tm.Send(enterKey()) // Trace (interactive TUI) -- default first mode
+	tm.Type("/")        // open the process list's filter
+	tm.Type("myapp")    // narrow to the one process actually wanted
+	tm.Send(enterKey()) // apply the filter
+	tm.Send(enterKey()) // confirm the (now sole/top) filtered selection
+
+	fm := finalOf(t, tm)
+	want := []string{"trace", "--pid", "5678"}
+	if !equalArgs(fm.result.Args, want) {
+		t.Fatalf("result.Args = %v, want %v (filtering to \"myapp\" should select PID 5678, not the default cursor position)", fm.result.Args, want)
+	}
+}
+
 func TestLauncherEscAtModeStageQuits(t *testing.T) {
 	tm := newTestLauncher(t)
 	tm.Send(escKey())

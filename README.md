@@ -2,8 +2,9 @@
 
 A per-PID syscall/socket tracer built on eBPF (CO-RE via `cilium/ebpf` + `bpf2go`), with a
 `bubbletea` TUI, that can record a traced HTTP request and its Redis dependencies as a
-replayable YAML test case. This is Milestones 1–4 of a larger eBPF traffic-recording
-project — see [Roadmap](#roadmap) for what's deliberately not built yet.
+replayable YAML test case — and replay that recording later with the real dependency
+offline. This is Milestones 1–5 of a larger eBPF traffic-recording project — see
+[Roadmap](#roadmap) for what's deliberately not built yet.
 
 Build notes, bugs, and gotchas encountered along the way (kept for a future write-up, not
 part of this reference doc) are in [`NOTES.md`](NOTES.md).
@@ -19,6 +20,8 @@ either to a live terminal UI or as plain text.
 sudo ./etrace trace --pid <pid>            # interactive TUI (default)
 sudo ./etrace trace --pid <pid> --no-tui   # plain-text stream
 sudo ./etrace record --pid <pid> -o test.yaml   # record one HTTP request + Redis deps as YAML
+./etrace run --test test.yaml -- ./your-app     # replay: your-app's Redis deps are served
+                                                 # from test.yaml, no real Redis needed
 ```
 
 The TUI has three tabs (`Tab` to cycle, `q` to quit): **Events** is the flat, timestamped
@@ -50,7 +53,14 @@ response:
         name: Alice
 ```
 
-Root (or `CAP_BPF`+`CAP_PERFMON`) is required to load BPF programs.
+`etrace run` reads that YAML back and stands in for the real Redis: it starts a userspace
+RESP2 proxy for the recorded `type: redis` dependencies, points the given command at it via
+a `REDIS_ADDR` environment variable, and execs it. Stopping the real Redis first and running
+`curl -X POST /users` again through `etrace run` returns the identical recorded response —
+the app never notices its dependency is offline. No eBPF is involved in replay at all; it's
+plain userspace proxying, and no root is required.
+
+Root (or `CAP_BPF`+`CAP_PERFMON`) is required to load BPF programs (`trace`/`record` only).
 
 ## Building
 
@@ -117,6 +127,18 @@ added for `etrace record`, since connection-pooling clients like `go-redis` neve
 `close()` on a connection they intend to reuse. Without this, Redis traffic would be
 captured perfectly on the wire and then silently produce nothing.
 
+`internal/replay` is the read side of the same schema `internal/recorder` writes: it holds
+no eBPF, no channels, and no relationship to the trace pipeline above at all — `etrace run`
+loads a YAML file directly and starts a `replay.Proxy` that speaks just enough RESP2 to (1)
+tolerate a real client's connection handshake (`HELLO`, `CLIENT SETINFO`, ...) with a
+syntactically valid RESP error reply, since those commands were filtered out of the
+recording by `decoder.IsAdminCommand` and have no recorded reply to give back, and (2) match
+a real command against the recorded dependency list by exact, case-insensitive text and
+reply with `decoder.EncodeReply` — the inverse of the `RESPValue.String()` rendering
+`TryRESP` used to store the reply as a plain string in the first place. `etrace run` execs
+the given command with `REDIS_ADDR` pointing at the proxy; the app's own code is unaware
+it's talking to anything but Redis.
+
 `read()` is captured as an entry+exit pair: the buffer isn't populated until the syscall
 returns, so `sys_enter_read` stashes `{buf, fd}` in a BPF hash map keyed by `pid_tgid`, and
 `sys_exit_read` reads the buffer using the real return length. `write()`, `connect()`, and
@@ -171,14 +193,29 @@ freed fd must not merge its byte counts or endpoint into the previous connection
   every Redis exchange as a dependency of it, with no way to tell "this Redis call belongs
   to a *different*, later HTTP request" — matches the single-request-at-a-time scope, but
   means `etrace record` isn't meant to be left running across multiple requests.
+- `etrace run`'s proxy matches an incoming command against a recorded dependency by exact,
+  case-insensitive text (`strings.Join(cmd, " ")`) — a command with different argument
+  values than what was recorded (e.g. `set user:42 Bob` when the recording has
+  `set user:42 Alice`) gets a "no recorded reply" RESP error, not a fuzzy or parameterized
+  match. Matches the guide's scope of replaying one recorded interaction exactly, not a
+  general-purpose Redis mock.
+- The replay proxy only serves `type: redis` dependencies (the only dependency type M4's
+  recorder produces); it has no HTTP-dependency replay, since v1 has no scenario that needs
+  one (the HTTP exchange is the request *under test*, not a dependency of it).
+- `EncodeReply` reconstructs RESP wire bytes from the plain display string
+  `RESPValue.String()` stored in the YAML (e.g. `"OK"`), not from the original type byte —
+  round-trips exactly for every reply shape this project's example app actually produces
+  (simple strings, `(nil)`, `(error) ...`, `(integer) ...`), but a value that's ambiguous
+  between simple-string and bulk-string encoding (e.g. a recorded bulk-string reply whose
+  content happens to *look* like plain text) is re-encoded as a simple string. Real Redis
+  clients decode both the same way for ordinary string values, so this hasn't mattered in
+  practice, but it's not a byte-exact replay of the original wire format.
 
 ## Roadmap
 
 Not built yet; each is a self-contained follow-on milestone on top of the same
 `collector` → channel → stage → ... → consumer architecture:
 
-- **M5 — Replay engine**: a userspace RESP proxy that serves recorded responses instead of
-  a real Redis, so a recorded test case can be replayed with the dependency offline.
 - **TLS uprobes**: `SSL_write`/`SSL_read` uprobes (the `SSL_read` entry+return stash reuses
   the same pattern built for `read()` in M1) so HTTPS traffic feeds the same HTTP decoder,
   sourcing plaintext at the TLS boundary. A known technique (Pixie's SSL tracing, bcc's

@@ -9,6 +9,7 @@ import (
 	"github.com/vidhu/etracer/internal/collector"
 	"github.com/vidhu/etracer/internal/correlator"
 	"github.com/vidhu/etracer/internal/printer"
+	"github.com/vidhu/etracer/internal/streamer"
 	"github.com/vidhu/etracer/internal/tui"
 )
 
@@ -55,8 +56,9 @@ func traceCmd() *cobra.Command {
 				return nil
 			}
 
-			rawEvents, conns := correlator.Run(events, c.EventTime)
-			return tui.Run(rawEvents, conns, c.EventTime)
+			rawEvents1, conns := correlator.Run(events, c.EventTime)
+			rawEvents2, exchanges := streamer.Run(rawEvents1)
+			return tui.Run(rawEvents2, conns, exchanges, c.EventTime)
 		},
 	}
 

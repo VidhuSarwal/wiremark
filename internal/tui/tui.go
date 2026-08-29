@@ -15,6 +15,7 @@ import (
 
 	"github.com/vidhu/etracer/internal/collector"
 	"github.com/vidhu/etracer/internal/correlator"
+	"github.com/vidhu/etracer/internal/streamer"
 )
 
 // maxRows bounds memory for long-running traces; older rows scroll off.
@@ -233,30 +234,137 @@ func connRow(c correlator.Connection) table.Row {
 	}
 }
 
-// ---- top-level model: tabs between the two views above ----
+// ---- HTTP tab: M3, one row per decoded exchange ----
+
+type httpMsg streamer.Exchange
+
+type httpClosedMsg struct{}
+
+type httpTab struct {
+	table     table.Model
+	exchanges <-chan streamer.Exchange
+	rows      []table.Row
+	closed    bool
+}
+
+func newHTTPTab(exchanges <-chan streamer.Exchange) httpTab {
+	t := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "PID", Width: 8},
+			{Title: "FD", Width: 5},
+			{Title: "Method", Width: 8},
+			{Title: "Path", Width: 20},
+			{Title: "Status", Width: 8},
+			{Title: "Body", Width: 40},
+			{Title: "Trunc", Width: 6},
+		}),
+		table.WithFocused(true),
+		table.WithHeight(20),
+	)
+	t.SetStyles(defaultTableStyles())
+	return httpTab{table: t, exchanges: exchanges}
+}
+
+func waitForExchange(exchanges <-chan streamer.Exchange) tea.Cmd {
+	return func() tea.Msg {
+		ex, ok := <-exchanges
+		if !ok {
+			return httpClosedMsg{}
+		}
+		return httpMsg(ex)
+	}
+}
+
+func (m httpTab) init() tea.Cmd {
+	return waitForExchange(m.exchanges)
+}
+
+func (m httpTab) update(msg tea.Msg) (httpTab, tea.Cmd) {
+	switch msg := msg.(type) {
+	case httpMsg:
+		m.rows = append(m.rows, httpRow(streamer.Exchange(msg)))
+		if len(m.rows) > maxRows {
+			m.rows = m.rows[len(m.rows)-maxRows:]
+		}
+		m.table.SetRows(m.rows)
+		m.table.GotoBottom()
+		return m, waitForExchange(m.exchanges)
+	case httpClosedMsg:
+		m.closed = true
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.table, cmd = m.table.Update(msg)
+	return m, cmd
+}
+
+func (m httpTab) view(footer string) string {
+	if m.closed {
+		footer = "trace ended -- " + footer
+	}
+	return m.table.View() + "\n" + faint(footer)
+}
+
+func httpRow(ex streamer.Exchange) table.Row {
+	method, path := "-", "-"
+	if ex.Request != nil {
+		method = ex.Request.Method
+		path = ex.Request.URL.Path
+	}
+	status := "-"
+	body := ex.RequestBody
+	if ex.Response != nil {
+		status = fmt.Sprintf("%d", ex.Response.StatusCode)
+		body = ex.ResponseBody
+	}
+	preview := string(body)
+	if len(preview) > 37 {
+		preview = preview[:37] + "..."
+	}
+	trunc := ""
+	if ex.Truncated {
+		trunc = "yes"
+	}
+	return table.Row{
+		fmt.Sprintf("%d", ex.PID),
+		fmt.Sprintf("%d", ex.FD),
+		method,
+		path,
+		status,
+		preview,
+		trunc,
+	}
+}
+
+// ---- top-level model: tabs between the views above ----
 
 type tab int
 
 const (
 	tabEvents tab = iota
 	tabConnections
+	tabHTTP
 )
+
+var tabNames = [...]string{tabEvents: "Events", tabConnections: "Connections", tabHTTP: "HTTP"}
 
 type Model struct {
 	active tab
 	events eventsTab
 	conns  connsTab
+	http   httpTab
 }
 
-func newModel(rawEvents <-chan collector.Event, conns <-chan correlator.Connection, timeOf func(collector.Event) time.Time) Model {
+func newModel(rawEvents <-chan collector.Event, conns <-chan correlator.Connection, exchanges <-chan streamer.Exchange, timeOf func(collector.Event) time.Time) Model {
 	return Model{
 		events: newEventsTab(rawEvents, timeOf),
 		conns:  newConnsTab(conns),
+		http:   newHTTPTab(exchanges),
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.events.init(), m.conns.init())
+	return tea.Batch(m.events.init(), m.conns.init(), m.http.init())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -265,42 +373,60 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "tab":
-			if m.active == tabEvents {
-				m.active = tabConnections
-			} else {
-				m.active = tabEvents
-			}
+			m.active = (m.active + 1) % tab(len(tabNames))
 			return m, nil
 		}
 	}
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		h := size.Height - 4
 		m.events.table.SetWidth(size.Width)
-		m.events.table.SetHeight(size.Height - 4)
+		m.events.table.SetHeight(h)
 		m.conns.table.SetWidth(size.Width)
-		m.conns.table.SetHeight(size.Height - 4)
+		m.conns.table.SetHeight(h)
+		m.http.table.SetWidth(size.Width)
+		m.http.table.SetHeight(h)
 	}
 
-	// Both tabs must keep consuming their channel regardless of which is
-	// visible, or the idle tab's channel backs up and blocks the collector
-	// goroutine feeding it.
-	var cmds [2]tea.Cmd
+	// Every tab must keep consuming its channel regardless of which is
+	// visible, or an idle tab's channel backs up and blocks the goroutine
+	// feeding it further upstream.
+	var cmds [3]tea.Cmd
 	m.events, cmds[0] = m.events.update(msg)
 	m.conns, cmds[1] = m.conns.update(msg)
-	return m, tea.Batch(cmds[0], cmds[1])
+	m.http, cmds[2] = m.http.update(msg)
+	return m, tea.Batch(cmds[0], cmds[1], cmds[2])
 }
 
 func (m Model) View() string {
 	const footer = "tab: switch view  q: quit"
-	if m.active == tabConnections {
-		return "[Events] [" + lipgloss.NewStyle().Underline(true).Render("Connections") + "]\n" + m.conns.view(footer)
+
+	var header string
+	for i, name := range tabNames {
+		if i > 0 {
+			header += " "
+		}
+		if tab(i) == m.active {
+			name = lipgloss.NewStyle().Underline(true).Render(name)
+		}
+		header += "[" + name + "]"
 	}
-	return "[" + lipgloss.NewStyle().Underline(true).Render("Events") + "] [Connections]\n" + m.events.view(footer)
+
+	var body string
+	switch m.active {
+	case tabConnections:
+		body = m.conns.view(footer)
+	case tabHTTP:
+		body = m.http.view(footer)
+	default:
+		body = m.events.view(footer)
+	}
+	return header + "\n" + body
 }
 
-// Run launches the interactive TUI, blocking until the user quits or both
+// Run launches the interactive TUI, blocking until the user quits or all
 // channels close.
-func Run(rawEvents <-chan collector.Event, conns <-chan correlator.Connection, timeOf func(collector.Event) time.Time) error {
-	p := tea.NewProgram(newModel(rawEvents, conns, timeOf), tea.WithAltScreen())
+func Run(rawEvents <-chan collector.Event, conns <-chan correlator.Connection, exchanges <-chan streamer.Exchange, timeOf func(collector.Event) time.Time) error {
+	p := tea.NewProgram(newModel(rawEvents, conns, exchanges, timeOf), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }

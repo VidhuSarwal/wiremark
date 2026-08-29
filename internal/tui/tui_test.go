@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -11,28 +12,31 @@ import (
 
 	"github.com/vidhu/etracer/internal/collector"
 	"github.com/vidhu/etracer/internal/correlator"
+	"github.com/vidhu/etracer/internal/streamer"
 )
 
 // fixedTime lets tests assert on exact rendered timestamps.
 var fixedTime = time.Date(2026, 1, 1, 12, 31, 1, 142_000_000, time.UTC)
 
-func newTestModel(t *testing.T) (*teatest.TestModel, chan collector.Event, chan correlator.Connection) {
+func newTestModel(t *testing.T) (*teatest.TestModel, chan collector.Event, chan correlator.Connection, chan streamer.Exchange) {
 	t.Helper()
 	events := make(chan collector.Event)
 	conns := make(chan correlator.Connection)
-	m := newModel(events, conns, func(collector.Event) time.Time { return fixedTime })
+	exchanges := make(chan streamer.Exchange)
+	m := newModel(events, conns, exchanges, func(collector.Event) time.Time { return fixedTime })
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 30))
 	t.Cleanup(func() {
 		close(events)
 		close(conns)
+		close(exchanges)
 	})
-	return tm, events, conns
+	return tm, events, conns, exchanges
 }
 
 // --- events tab: same behavior as the original M1 view, now under a tab ---
 
 func TestTUIRendersEvent(t *testing.T) {
-	tm, _, _ := newTestModel(t)
+	tm, _, _, _ := newTestModel(t)
 
 	tm.Send(eventMsg{
 		ev: collector.Event{
@@ -53,10 +57,12 @@ func TestTUIRendersEvent(t *testing.T) {
 func TestTUIShowsTraceEndedWhenChannelCloses(t *testing.T) {
 	events := make(chan collector.Event)
 	conns := make(chan correlator.Connection)
-	m := newModel(events, conns, func(collector.Event) time.Time { return fixedTime })
+	exchanges := make(chan streamer.Exchange)
+	m := newModel(events, conns, exchanges, func(collector.Event) time.Time { return fixedTime })
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 30))
 	close(events)
 	close(conns)
+	close(exchanges)
 
 	teatest.WaitFor(t, tm.Output(), func(out []byte) bool {
 		return bytes.Contains(out, []byte("trace ended"))
@@ -68,7 +74,7 @@ func TestTUIShowsTraceEndedWhenChannelCloses(t *testing.T) {
 
 func TestTUIRowCapBoundsMemory(t *testing.T) {
 	const overflow = 50
-	m := newModel(nil, nil, func(collector.Event) time.Time { return fixedTime })
+	m := newModel(nil, nil, nil, func(collector.Event) time.Time { return fixedTime })
 
 	for i := 0; i < maxRows+overflow; i++ {
 		next, _ := m.Update(eventMsg{ev: collector.Event{PID: uint32(i), Operation: collector.OpClose}, t: fixedTime})
@@ -91,7 +97,7 @@ func TestTUIRowCapBoundsMemory(t *testing.T) {
 // --- connections tab: M2 ---
 
 func TestTUIConnectionsTabUpdatesRowInPlace(t *testing.T) {
-	tm, _, conns := newTestModel(t)
+	tm, _, conns, _ := newTestModel(t)
 
 	// Switch to the connections tab.
 	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
@@ -130,7 +136,7 @@ func TestTUIConnectionsTabUpdatesRowInPlace(t *testing.T) {
 }
 
 func TestTUIConnectionsTabDistinctSeqAreDistinctRows(t *testing.T) {
-	m := newModel(nil, nil, func(collector.Event) time.Time { return fixedTime })
+	m := newModel(nil, nil, nil, func(collector.Event) time.Time { return fixedTime })
 
 	next, _ := m.Update(connMsg(correlator.Connection{Seq: 1, PID: 1, FD: 7, RemotePort: 111}))
 	m = next.(Model)
@@ -139,5 +145,72 @@ func TestTUIConnectionsTabDistinctSeqAreDistinctRows(t *testing.T) {
 
 	if len(m.conns.rows) != 2 {
 		t.Fatalf("got %d rows for two distinct Seqs on the same (pid,fd), want 2", len(m.conns.rows))
+	}
+}
+
+// --- HTTP tab: M3 ---
+
+func TestTUIHTTPTabRendersExchange(t *testing.T) {
+	tm, _, _, exchanges := newTestModel(t)
+
+	// Cycle Events -> Connections -> HTTP.
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+
+	req, err := http.NewRequest("GET", "/medium", nil)
+	if err != nil {
+		t.Fatalf("build fixture request: %v", err)
+	}
+	exchanges <- streamer.Exchange{
+		PID: 42, FD: 7,
+		Request:      req,
+		Response:     &http.Response{StatusCode: 200},
+		ResponseBody: []byte(`{"id":42}`),
+	}
+
+	teatest.WaitFor(t, tm.Output(), func(out []byte) bool {
+		return bytes.Contains(out, []byte("GET")) &&
+			bytes.Contains(out, []byte("/medium")) &&
+			bytes.Contains(out, []byte("200"))
+	}, teatest.WithDuration(2*time.Second))
+
+	tm.Type("q")
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+}
+
+func TestTUIHTTPTabTruncatedMarker(t *testing.T) {
+	m := newModel(nil, nil, nil, func(collector.Event) time.Time { return fixedTime })
+
+	next, _ := m.Update(httpMsg(streamer.Exchange{PID: 1, FD: 1, Truncated: true}))
+	m = next.(Model)
+
+	if len(m.http.rows) != 1 {
+		t.Fatalf("got %d HTTP rows, want 1", len(m.http.rows))
+	}
+	const truncCol = 6
+	if got := m.http.rows[0][truncCol]; got != "yes" {
+		t.Errorf("Trunc column = %q, want %q", got, "yes")
+	}
+}
+
+func TestTUITabCyclesThroughAllThree(t *testing.T) {
+	m := newModel(nil, nil, nil, func(collector.Event) time.Time { return fixedTime })
+	if m.active != tabEvents {
+		t.Fatalf("initial tab = %v, want tabEvents", m.active)
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.active != tabConnections {
+		t.Fatalf("after 1 Tab = %v, want tabConnections", m.active)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.active != tabHTTP {
+		t.Fatalf("after 2 Tabs = %v, want tabHTTP", m.active)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.active != tabEvents {
+		t.Fatalf("after 3 Tabs = %v, want tabEvents (wrapped)", m.active)
 	}
 }

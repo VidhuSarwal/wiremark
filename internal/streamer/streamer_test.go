@@ -136,6 +136,76 @@ func TestRunFlushesOnChannelCloseWithoutOpClose(t *testing.T) {
 	}
 }
 
+// eventForSSL mirrors eventFor for TLS-sourced events: no fd (bpf/tls.bpf.c
+// always sets it to -1), an SSL* identity instead.
+func eventForSSL(pid uint32, sslPtr uint64, op uint32, payload string) collector.Event {
+	ev := collector.Event{PID: pid, FD: -1, SSLPtr: sslPtr, Operation: op, DataLen: uint32(len(payload)), TotalLen: uint32(len(payload))}
+	copy(ev.Data[:], payload)
+	return ev
+}
+
+// TestRunDecodesTLSConnectionBySSLPtr guards the TLS milestone's core
+// design decision: SSL_write/SSL_read events have no fd, so the streamer
+// must bucket them by ssl_ptr instead -- and since there's no SSL_shutdown/
+// SSL_free probe, a TLS connection can only ever be decoded through the
+// end-of-trace flush path, same as a pooled go-redis connection.
+func TestRunDecodesTLSConnectionBySSLPtr(t *testing.T) {
+	events := make(chan collector.Event, 8)
+	events <- eventForSSL(1, 0xdeadbeef, collector.OpSSLWrite, capturedRequest)
+	events <- eventForSSL(1, 0xdeadbeef, collector.OpSSLRead, capturedResponse)
+	close(events)
+
+	rawOut, exchanges := Run(events)
+	go func() {
+		for range rawOut {
+		}
+	}()
+
+	ex, ok := <-exchanges
+	if !ok {
+		t.Fatal("no Exchange emitted for a TLS connection flushed at trace end")
+	}
+	if ex.Protocol != ProtocolHTTP || ex.HTTP == nil || ex.HTTP.Request == nil || ex.HTTP.Request.URL.Path != "/medium" {
+		t.Fatalf("Exchange = %+v, want decoded HTTP from TLS-sourced plaintext", ex)
+	}
+}
+
+// TestRunDoesNotAliasFDAndSSLPtrWithTheSameNumericValue guards the exact
+// aliasing risk the key type's kind field exists to prevent: an fd and an
+// unrelated SSL* can coincidentally share a numeric value, and they must
+// not be merged into the same buffer.
+func TestRunDoesNotAliasFDAndSSLPtrWithTheSameNumericValue(t *testing.T) {
+	const sharedID = 5
+	events := make(chan collector.Event, 8)
+	events <- eventFor(1, sharedID, collector.OpWrite, capturedSetCommand)
+	events <- eventFor(1, sharedID, collector.OpRead, capturedOKReply)
+	events <- eventForSSL(1, sharedID, collector.OpSSLWrite, capturedRequest)
+	events <- eventForSSL(1, sharedID, collector.OpSSLRead, capturedResponse)
+	close(events)
+
+	rawOut, exchanges := Run(events)
+	go func() {
+		for range rawOut {
+		}
+	}()
+
+	var got []Exchange
+	for ex := range exchanges {
+		got = append(got, ex)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d exchanges, want 2 (one Redis via fd, one HTTP via ssl_ptr -- not merged)", len(got))
+	}
+	var sawRedis, sawHTTP bool
+	for _, ex := range got {
+		sawRedis = sawRedis || ex.Protocol == ProtocolRedis
+		sawHTTP = sawHTTP || ex.Protocol == ProtocolHTTP
+	}
+	if !sawRedis || !sawHTTP {
+		t.Fatalf("exchanges = %+v, want one Redis and one HTTP", got)
+	}
+}
+
 func TestRunPassesThroughEveryEvent(t *testing.T) {
 	events := make(chan collector.Event, 3)
 	events <- eventFor(1, 5, collector.OpRead, "x")

@@ -59,9 +59,23 @@ func decode(pid uint32, fd int32, readBuf, writeBuf []byte, truncated bool) (Exc
 // Truncated() flag, not this cap directly -- see appendCapped).
 const bufCap = 64 * 1024
 
+// connKind discriminates the two shapes of connection identity this project
+// captures: a plain fd (syscall-sourced traffic) or an SSL* pointer
+// (TLS-sourced traffic, which has no fd recoverable in-kernel -- see
+// bpf/types.h's ssl_ptr field). Both need to coexist in the same map without
+// colliding, since a small fd number and a heap pointer truncated to the
+// wrong width could otherwise alias.
+type connKind uint8
+
+const (
+	connFD connKind = iota
+	connTLS
+)
+
 type key struct {
-	pid uint32
-	fd  int32
+	pid  uint32
+	kind connKind
+	id   uint64 // fd (widened) for connFD, the SSL* value for connTLS
 }
 
 type connBufs struct {
@@ -108,17 +122,29 @@ func Run(events <-chan collector.Event) (rawOut <-chan collector.Event, exchange
 		for ev := range events {
 			raw <- ev
 
-			k := key{pid: ev.PID, fd: ev.FD}
+			var k key
 			switch ev.Operation {
-			case collector.OpRead:
+			case collector.OpRead, collector.OpWrite, collector.OpClose:
+				k = key{pid: ev.PID, kind: connFD, id: uint64(uint32(ev.FD))}
+			case collector.OpSSLRead, collector.OpSSLWrite:
+				k = key{pid: ev.PID, kind: connTLS, id: ev.SSLPtr}
+			default:
+				continue // OpConnect: nothing for the streamer to buffer
+			}
+
+			switch ev.Operation {
+			case collector.OpRead, collector.OpSSLRead:
 				b := get(k)
 				appendCapped(&b.read, ev.Payload())
 				b.truncated = b.truncated || ev.Truncated()
-			case collector.OpWrite:
+			case collector.OpWrite, collector.OpSSLWrite:
 				b := get(k)
 				appendCapped(&b.write, ev.Payload())
 				b.truncated = b.truncated || ev.Truncated()
 			case collector.OpClose:
+				// TLS connections have no close probe (see bpf/tls.bpf.c) --
+				// they're only ever decoded by the end-of-trace flush below,
+				// same as a pooled go-redis connection.
 				if b, ok := bufs[k]; ok {
 					if ex, ok := decode(ev.PID, ev.FD, b.read, b.write, b.truncated); ok {
 						out <- ex
@@ -132,11 +158,17 @@ func Run(events <-chan collector.Event) (rawOut <-chan collector.Event, exchange
 		// connection (e.g. go-redis) is never closed, so without this a
 		// buffer that never saw OpClose would be silently discarded and
 		// its traffic would never be decoded. This also retroactively
-		// covers M3's documented keep-alive-connection limitation. Scoped
-		// to one command/reply pair per connection -- multiple pooled
-		// commands on the same fd within one trace aren't disentangled.
+		// covers M3's documented keep-alive-connection limitation, and is
+		// the only path TLS connections are ever decoded through, since
+		// there's no SSL_shutdown/SSL_free probe. Scoped to one
+		// command/reply pair per connection -- multiple pooled commands on
+		// the same connection within one trace aren't disentangled.
 		for k, b := range bufs {
-			if ex, ok := decode(k.pid, k.fd, b.read, b.write, b.truncated); ok {
+			fd := int32(-1)
+			if k.kind == connFD {
+				fd = int32(k.id)
+			}
+			if ex, ok := decode(k.pid, fd, b.read, b.write, b.truncated); ok {
 				out <- ex
 			}
 		}

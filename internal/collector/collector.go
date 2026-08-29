@@ -5,11 +5,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 
 	"github.com/vidhu/etracer/internal/bpfgen"
 )
@@ -42,6 +44,18 @@ type Collector struct {
 	objs  bpfgen.SyscallObjects
 	links []link.Link
 	rd    *ringbuf.Reader
+
+	// monoRefNs/wallRef let EventTime convert a BPF event's boot-relative
+	// bpf_ktime_get_ns() timestamp into a wall-clock time.Time.
+	monoRefNs uint64
+	wallRef   time.Time
+}
+
+// EventTime converts an Event's boot-relative monotonic timestamp (as
+// produced by bpf_ktime_get_ns in the kernel) into wall-clock time.
+func (c *Collector) EventTime(ev Event) time.Time {
+	delta := int64(ev.Timestamp) - int64(c.monoRefNs)
+	return c.wallRef.Add(time.Duration(delta))
 }
 
 // New loads and attaches the syscall tracepoints, scoped in-kernel to pid.
@@ -69,7 +83,16 @@ func New(pid uint32) (*Collector, error) {
 		return nil, fmt.Errorf("load bpf objects: %w", err)
 	}
 
-	c := &Collector{objs: objs}
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return nil, fmt.Errorf("read monotonic clock: %w", err)
+	}
+
+	c := &Collector{
+		objs:      objs,
+		monoRefNs: uint64(ts.Sec)*1e9 + uint64(ts.Nsec),
+		wallRef:   time.Now(),
+	}
 
 	tracepoints := []struct {
 		name string

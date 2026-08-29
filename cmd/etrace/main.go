@@ -3,55 +3,61 @@ package main
 import (
 	"fmt"
 	"os"
-	"strconv"
+
+	"github.com/spf13/cobra"
 
 	"github.com/vidhu/etracer/internal/collector"
+	"github.com/vidhu/etracer/internal/printer"
+	"github.com/vidhu/etracer/internal/tui"
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: etrace-smoke <pid>")
-		os.Exit(1)
-	}
-	pid, err := strconv.ParseUint(os.Args[1], 10, 32)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "invalid pid:", err)
-		os.Exit(1)
-	}
-
-	c, err := collector.New(uint32(pid))
-	if err != nil {
+	if err := rootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	defer c.Close()
+}
 
-	events, errs := c.Run()
-	fmt.Printf("smoke test: tracing pid %d (Ctrl-C to stop)...\n", pid)
-	for {
-		select {
-		case ev, ok := <-events:
-			if !ok {
-				return
+func rootCmd() *cobra.Command {
+	root := &cobra.Command{Use: "etrace"}
+	root.AddCommand(traceCmd())
+	return root
+}
+
+func traceCmd() *cobra.Command {
+	var pid int
+	var noTUI bool
+
+	cmd := &cobra.Command{
+		Use:   "trace",
+		Short: "Trace connect/write/read/close syscalls for a PID",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if pid <= 0 {
+				return fmt.Errorf("--pid is required and must be positive")
 			}
-			switch ev.Operation {
-			case collector.OpConnect:
-				fmt.Printf("PID %d fd=%d CONNECT -> %d.%d.%d.%d:%d\n",
-					ev.PID, ev.FD,
-					byte(ev.RemoteAddr), byte(ev.RemoteAddr>>8), byte(ev.RemoteAddr>>16), byte(ev.RemoteAddr>>24),
-					ev.RemotePort)
-			case collector.OpWrite:
-				fmt.Printf("PID %d fd=%d WRITE %d bytes: %q\n", ev.PID, ev.FD, ev.DataLen, ev.Data[:ev.DataLen])
-			case collector.OpRead:
-				fmt.Printf("PID %d fd=%d READ %d bytes: %q\n", ev.PID, ev.FD, ev.DataLen, ev.Data[:ev.DataLen])
-			case collector.OpClose:
-				fmt.Printf("PID %d fd=%d CLOSE\n", ev.PID, ev.FD)
+
+			c, err := collector.New(uint32(pid))
+			if err != nil {
+				return fmt.Errorf("start collector: %w", err)
 			}
-		case err, ok := <-errs:
-			if !ok {
-				return
+			defer c.Close()
+
+			events, errs := c.Run()
+			go func() {
+				for err := range errs {
+					fmt.Fprintln(os.Stderr, "collector error:", err)
+				}
+			}()
+
+			if noTUI {
+				printer.Print(os.Stdout, events, c.EventTime)
+				return nil
 			}
-			fmt.Fprintln(os.Stderr, "error:", err)
-		}
+			return tui.Run(events, c.EventTime)
+		},
 	}
+
+	cmd.Flags().IntVar(&pid, "pid", 0, "PID to trace (required)")
+	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "print plain-text events instead of launching the TUI")
+	return cmd
 }

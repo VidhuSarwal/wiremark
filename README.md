@@ -33,6 +33,22 @@ links OpenSSL directly — Go's `crypto/tls` never calls it, so it won't help ag
 HTTPS client or server. `curl`, `openssl s_client`/`s_server`, and most non-Go language
 runtimes' TLS stacks do.
 
+### Interactive launcher
+
+Not sure which command/flags/PID you want, or just want to point-and-click instead of
+typing a full invocation? `etrace launch` is a `bubbletea` menu that picks a mode first
+(the four `trace`/`record` variants above, or a `run` replay), then walks through only
+the inputs that mode actually needs — a PID (filterable, type to narrow a long process
+list), an output path, or a YAML file plus a command to exec:
+
+```
+./etrace launch
+```
+
+It doesn't run anything itself: once you confirm a selection, it tears down its own UI,
+prints the exact command it assembled, and `exec`s straight into it (`sudo`-prefixed only
+for the modes that load BPF). The launcher process itself never needs root.
+
 The TUI has three tabs (`Tab` to cycle, `q` to quit): **Events** is the flat, timestamped
 syscall (and, with `--tls`, `SSL_write`/`SSL_read`) log; **Connections** groups
 syscall-sourced traffic by `(pid, fd)` into one row per socket lifecycle — remote endpoint,
@@ -182,6 +198,15 @@ whether the process linked the system OpenSSL or a bundled one) and attaches wit
 the kernel level — stronger than the syscall tracepoints' guard-clause-only approach, since
 a call in a different process never reaches the program to be checked at all.
 
+`internal/launcher` has no relationship to any of the above beyond assembling command-line
+args for it: a `bubbletea` model, given a `[]Process` and a YAML-path default (never reading
+`/proc` or the filesystem itself, matching the rest of the TUI's testability pattern), walks
+a mode-first flow to a `Result{Args, NeedsSudo}` and quits. `cmd/etrace`'s `launch` command
+runs that to completion, lets its `tea.Program` fully tear down, then `syscall.Exec`s the
+assembled command — never in-process, and never while its own UI is still on screen (`trace`
+launched from the menu runs its own `bubbletea` program, and one can't nest inside another
+without both fighting over the alt-screen).
+
 ## Known limitations (v1)
 
 - Only `AF_INET` (IPv4) `connect()` addresses are decoded; other address families report a
@@ -257,6 +282,10 @@ a call in a different process never reaches the program to be checked at all.
 - `internal/correlator`'s Connections tab has no concept of an `ssl_ptr`-keyed connection at
   all (it only tracks `connect()`-based fd lifecycles); TLS traffic is visible in the Events
   and HTTP tabs but never in Connections.
+- `etrace launch`'s `run` mode splits the command-to-exec on whitespace (`strings.Fields`),
+  not a shell-aware tokenizer — a command whose arguments need quoting (spaces, globs) won't
+  parse correctly. Type the full `etrace run --test ... -- <command>` invocation directly for
+  those cases; the launcher is a convenience path for the common one, not a shell.
 
 ## Roadmap
 

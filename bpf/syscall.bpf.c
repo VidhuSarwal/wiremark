@@ -3,6 +3,7 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 #include "types.h"
+#include "common.bpf.h"
 
 #define AF_INET 2
 
@@ -34,20 +35,6 @@ struct {
 	__type(key, __u64);
 	__type(value, struct read_args);
 } read_stash SEC(".maps");
-
-static __always_inline void fill_common(struct event *e, __u32 op)
-{
-	__u64 pid_tgid = bpf_get_current_pid_tgid();
-	e->pid = pid_tgid >> 32;
-	e->tid = (__u32)pid_tgid;
-	e->timestamp = bpf_ktime_get_ns();
-	e->operation = op;
-	e->ret = 0;
-	e->remote_addr = 0;
-	e->remote_port = 0;
-	e->total_len = 0;
-	e->data_len = 0;
-}
 
 SEC("tracepoint/syscalls/sys_enter_connect")
 int trace_enter_connect(struct trace_event_raw_sys_enter *ctx)

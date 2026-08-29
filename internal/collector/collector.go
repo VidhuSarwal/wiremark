@@ -38,6 +38,18 @@ type Event struct {
 	Data       [256]byte
 }
 
+// Payload returns the captured bytes for a read/write event.
+func (e Event) Payload() []byte {
+	return e.Data[:e.DataLen]
+}
+
+// RemoteAddrString renders RemoteAddr/RemotePort as "a.b.c.d:port", valid
+// for OpConnect events with an AF_INET remote address.
+func (e Event) RemoteAddrString() string {
+	a := e.RemoteAddr
+	return fmt.Sprintf("%d.%d.%d.%d:%d", byte(a), byte(a>>8), byte(a>>16), byte(a>>24), e.RemotePort)
+}
+
 // Collector loads the BPF programs, attaches them, and streams decoded
 // events on a channel. It never touches the terminal.
 type Collector struct {

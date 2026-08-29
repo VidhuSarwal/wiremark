@@ -19,13 +19,11 @@ func Format(ev collector.Event, comm string, t time.Time) string {
 
 	switch ev.Operation {
 	case collector.OpConnect:
-		return fmt.Sprintf("%s CONNECT -> %d.%d.%d.%d:%d", prefix,
-			byte(ev.RemoteAddr), byte(ev.RemoteAddr>>8), byte(ev.RemoteAddr>>16), byte(ev.RemoteAddr>>24),
-			ev.RemotePort)
+		return fmt.Sprintf("%s CONNECT -> %s", prefix, ev.RemoteAddrString())
 	case collector.OpWrite:
-		return fmt.Sprintf("%s WRITE %d bytes: %q", prefix, ev.DataLen, ev.Data[:ev.DataLen])
+		return fmt.Sprintf("%s WRITE %d bytes: %q", prefix, ev.DataLen, ev.Payload())
 	case collector.OpRead:
-		return fmt.Sprintf("%s READ %d bytes: %q", prefix, ev.DataLen, ev.Data[:ev.DataLen])
+		return fmt.Sprintf("%s READ %d bytes: %q", prefix, ev.DataLen, ev.Payload())
 	case collector.OpClose:
 		return fmt.Sprintf("%s CLOSE", prefix)
 	default:

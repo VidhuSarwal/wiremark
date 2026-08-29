@@ -135,6 +135,14 @@ func New(pid uint32) (*Collector, error) {
 	return c, nil
 }
 
+// decodeEvent decodes a raw ring buffer record into an Event. The field
+// order and padding must match bpf/types.h's struct event exactly.
+func decodeEvent(raw []byte) (Event, error) {
+	var ev Event
+	err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &ev)
+	return ev, err
+}
+
 // Run reads the ring buffer until the reader is closed (via Close) or an
 // unrecoverable error occurs, publishing decoded events on the returned
 // channel. The channel is closed when Run returns.
@@ -155,8 +163,8 @@ func (c *Collector) Run() (<-chan Event, <-chan error) {
 				return
 			}
 
-			var ev Event
-			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &ev); err != nil {
+			ev, err := decodeEvent(record.RawSample)
+			if err != nil {
 				errs <- fmt.Errorf("decode event: %w", err)
 				continue
 			}

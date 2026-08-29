@@ -1,7 +1,7 @@
 # eTraceReplay
 
 A per-PID syscall/socket tracer built on eBPF (CO-RE via `cilium/ebpf` + `bpf2go`), with a
-`bubbletea` TUI. This is Milestones 1–2 of a larger eBPF traffic-recording project — see
+`bubbletea` TUI. This is Milestones 1–3 of a larger eBPF traffic-recording project — see
 [Roadmap](#roadmap) for what's deliberately not built yet.
 
 ## What this does
@@ -16,10 +16,12 @@ sudo ./etrace trace --pid <pid>            # interactive TUI (default)
 sudo ./etrace trace --pid <pid> --no-tui   # plain-text stream
 ```
 
-The TUI has two tabs (`Tab` to switch, `q` to quit): **Events** is the flat, timestamped
+The TUI has three tabs (`Tab` to cycle, `q` to quit): **Events** is the flat, timestamped
 syscall log; **Connections** groups them by `(pid, fd)` into one row per socket lifecycle —
 remote endpoint, cumulative bytes out/in, and open/closed state, updating in place rather
-than appending as new activity arrives on that socket.
+than appending as new activity arrives on that socket; **HTTP** shows one row per decoded
+request/response pair — method, path, status, a body preview, and whether the capture was
+truncated.
 
 Root (or `CAP_BPF`+`CAP_PERFMON`) is required to load BPF programs.
 
@@ -41,14 +43,32 @@ building on.
 
 Library-core, thin-consumer: `internal/collector` loads the BPF program, attaches the
 tracepoints, and publishes decoded `Event`s on a Go channel. It never touches a terminal.
-`internal/printer` (`--no-tui`) consumes that channel directly. In TUI mode,
-`internal/correlator` sits in between as the *sole* consumer of the collector's channel — Go
-channels deliver each value to exactly one receiver, so fanning the same channel out to two
-independent consumers isn't an option — and itself owns two output channels: a passthrough
-of the raw events (feeding the TUI's Events tab) and a stream of `Connection` snapshots
-(feeding the Connections tab). This is also what makes the TUI testable headlessly with
-`teatest` (`internal/tui/tui_test.go`): both tabs consume plain channels, so tests inject
+`internal/printer` (`--no-tui`) consumes that channel directly. In TUI mode, events flow
+through a chain of stages, each the *sole* consumer of the previous stage's channel — Go
+channels deliver each value to exactly one receiver, so fanning one channel out to multiple
+independent consumers isn't an option — and each owning further output channels of its own:
+
+```
+collector.Event  --->  correlator.Run  --->  streamer.Run  --->  tui.Run
+                        (raw passthrough,      (raw passthrough,
+                         Connection stream)      Exchange stream)
+```
+
+`internal/correlator` groups events into `Connection` snapshots (feeding the Connections
+tab). `internal/streamer` buffers each `(pid, fd)`'s read/write bytes and, on close,
+content-sniffs both directions as HTTP (feeding the HTTP tab). Every stage still forwards
+the raw event stream unchanged, which is what keeps the Events tab working all the way
+through the chain. This layering is also what makes the TUI testable headlessly with
+`teatest` (`internal/tui/tui_test.go`): every tab consumes a plain channel, so tests inject
 synthetic values instead of driving a live trace.
+
+The streamer doesn't need `accept()` tracking to identify a traced server's inbound
+sockets: it buffers every fd's bytes regardless of how the socket was established, and
+tries `http.ReadRequest`/`ReadResponse` in **both** role assignments (read=request,
+write=response for a traced HTTP server; the inverse for a traced client), keeping
+whichever parses. The inverse case isn't exercised by anything in v1 yet, but M4 (a traced
+Redis *client*) needs it, so `decode()` was made role-agnostic now rather than revisited
+later.
 
 `read()` is captured as an entry+exit pair: the buffer isn't populated until the syscall
 returns, so `sys_enter_read` stashes `{buf, fd}` in a BPF hash map keyed by `pid_tgid`, and
@@ -63,32 +83,35 @@ freed fd must not merge its byte counts or endpoint into the previous connection
 
 - Only `AF_INET` (IPv4) `connect()` addresses are decoded; other address families report a
   zero address rather than misdecoding.
-- Captured payloads are truncated to 256 bytes per event.
+- Captured payload content is truncated to 4096 bytes *per syscall event* (`Event.Truncated()`
+  reports when this happened); byte-count totals (Connections tab, `total_len`) are accurate
+  regardless, since they come from the syscall's true return value / requested count, not
+  the capture cap.
 - Only `connect`/`write`/`read`/`close` are traced — not `recv`/`send`/`accept` (some
   runtimes, e.g. CPython's `socket` module, use `recv`/`recvfrom` rather than `read`, so
   their socket reads won't appear as Out/In bytes in the Connections tab; plain `read()` on
   files and pipes will).
-- The correlator only tracks sockets *this process* called `connect()` on (the client
-  role). A traced process acting as a server (`accept()`ing inbound connections) won't show
-  up in the Connections tab yet — M3's HTTP decoding will need to add that.
+- The correlator (Connections tab) only tracks sockets *this process* called `connect()`
+  on (the client role) — a traced server's accepted sockets won't show up there. The
+  streamer (HTTP tab) doesn't have this limitation, since it doesn't need `connect()`/
+  `accept()` at all; it content-sniffs whatever bytes flow on any fd.
 - A process that dies without calling `close()` (e.g. killed) leaves its connections shown
-  as still-open; there's no `sched_process_exit`-based garbage collection in this scope. Not
-  worth adding yet — tracked state per connection is small, so the cost of a leaked entry
-  until the trace ends is negligible.
-- The correlator tracks byte *counts* only, not the actual payload content per connection
-  (each individual event's payload is still visible in the Events tab, truncated to 256
-  bytes). Assembling a per-connection byte stream is M3's job, once HTTP decoding defines
-  what buffering/capping it actually needs.
+  as still-open in the Connections tab, and any in-flight HTTP exchange on that fd is never
+  decoded (the streamer only attempts a parse on close). Not worth adding
+  `sched_process_exit`-based cleanup for either yet — tracked state per connection is small.
+- The streamer buffers up to 64KB per direction per connection; bytes beyond that are
+  silently dropped from the buffer (separately from, and in addition to, the per-event 4096
+  byte capture cap above).
+- HTTP decoding only fires once, on `close()`, for a whole connection's buffered bytes. A
+  keep-alive connection that's still open when the trace ends produces no HTTP tab row, and
+  attaching mid-connection (missing the start of a request/response) yields a byte stream
+  that won't parse. Both match the guide's single-request-at-a-time v1 scope.
 
 ## Roadmap
 
 Not built yet; each is a self-contained follow-on milestone on top of the same
-`collector` → channel → consumer architecture:
+`collector` → channel → stage → ... → consumer architecture:
 
-- **M3 — HTTP decoding**: parse per-connection byte streams (assembled from the Events tab's
-  granular read/write payloads, since the correlator only tracks counts) with
-  `net/http`'s `ReadRequest`/`ReadResponse` — deliberately not a hand-rolled parser, since
-  the value here is the kernel-level capture, not reimplementing `net/http`.
 - **M4 — Redis (RESP) decoding + recorder**: a minimal RESP parser plus a simple
   same-PID/time-window heuristic to attribute outbound Redis calls to the inbound HTTP
   request that triggered them, recorded as YAML test cases.

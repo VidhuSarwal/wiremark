@@ -3,8 +3,10 @@
 A per-PID syscall/socket tracer built on eBPF (CO-RE via `cilium/ebpf` + `bpf2go`), with a
 `bubbletea` TUI, that can record a traced HTTP request and its Redis dependencies as a
 replayable YAML test case — and replay that recording later with the real dependency
-offline. This is Milestones 1–5 of a larger eBPF traffic-recording project — see
-[Roadmap](#roadmap) for what's deliberately not built yet.
+offline. Optional `SSL_write`/`SSL_read` uprobes source the same HTTP decoding from
+plaintext at the TLS boundary, for HTTPS traffic. This is the full v1 scope of a larger
+eBPF traffic-recording project (Milestones 1–5 plus TLS uprobes) — see
+[Roadmap](#roadmap) for what's deliberately out of scope even so.
 
 Build notes, bugs, and gotchas encountered along the way (kept for a future write-up, not
 part of this reference doc) are in [`NOTES.md`](NOTES.md).
@@ -19,17 +21,30 @@ either to a live terminal UI or as plain text.
 ```
 sudo ./etrace trace --pid <pid>            # interactive TUI (default)
 sudo ./etrace trace --pid <pid> --no-tui   # plain-text stream
+sudo ./etrace trace --pid <pid> --tls      # also decode SSL_write/SSL_read plaintext
 sudo ./etrace record --pid <pid> -o test.yaml   # record one HTTP request + Redis deps as YAML
 ./etrace run --test test.yaml -- ./your-app     # replay: your-app's Redis deps are served
                                                  # from test.yaml, no real Redis needed
 ```
 
+`--tls` attaches `SSL_write`/`SSL_read` uprobes to the traced process's own loaded libssl
+(resolved from `/proc/<pid>/maps`), so it only does anything for a process that actually
+links OpenSSL directly — Go's `crypto/tls` never calls it, so it won't help against a Go
+HTTPS client or server. `curl`, `openssl s_client`/`s_server`, and most non-Go language
+runtimes' TLS stacks do.
+
 The TUI has three tabs (`Tab` to cycle, `q` to quit): **Events** is the flat, timestamped
-syscall log; **Connections** groups them by `(pid, fd)` into one row per socket lifecycle —
-remote endpoint, cumulative bytes out/in, and open/closed state, updating in place rather
-than appending as new activity arrives on that socket; **HTTP** shows one row per decoded
-HTTP request/response pair — method, path, status, a body preview, and whether the capture
-was truncated (Redis traffic doesn't get a TUI tab — see Architecture).
+syscall (and, with `--tls`, `SSL_write`/`SSL_read`) log; **Connections** groups
+syscall-sourced traffic by `(pid, fd)` into one row per socket lifecycle — remote endpoint,
+cumulative bytes out/in, and open/closed state, updating in place rather than appending as
+new activity arrives on that socket (TLS traffic has no fd and isn't tracked here — see
+Architecture); **HTTP** shows one row per decoded HTTP request/response pair — method,
+path, status, a body preview, and whether the capture was truncated (Redis traffic doesn't
+get a TUI tab — see Architecture). **Note:** a connection never closed during the trace —
+every TLS connection, plus a pooled/keep-alive plain socket — only decodes at the
+end-of-trace flush, which quitting the TUI happens *before*, so it never populates the HTTP
+tab; its raw traffic still appears live in the Events tab (plaintext, for TLS). Use
+`--no-tui` or `etrace record` to see the decoded form for those.
 
 `etrace record` runs until `Ctrl-C`, then writes a YAML test case built from what it saw
 during that window — matching the guide's schema:
@@ -76,7 +91,10 @@ make test      # unit + headless TUI tests, no root required
 ```
 
 `bpf/vmlinux.h` is machine-generated and gitignored — regenerate it on whatever box you're
-building on.
+building on. `internal/bpfgen/gen.go`'s TLS build target also computes a
+`-D__TARGET_ARCH_<arch>` flag from `uname -m` for the same reason: the uprobe code's
+`PT_REGS_PARMn`/`PT_REGS_RC` macros are architecture-specific and fail loudly at compile
+time (not silently) without it.
 
 ## Architecture
 
@@ -148,6 +166,22 @@ The correlator identifies a connection by a monotonic `Seq` assigned at `connect
 not just `(pid, fd)` — the kernel reuses fd numbers, so a second connection on a recently
 freed fd must not merge its byte counts or endpoint into the previous connection's row.
 
+`--tls` attaches a separate BPF object (`bpf/tls.bpf.c`, its own `bpf2go` target) with
+uprobes on `SSL_write` (single-probe, like `write()`) and `SSL_read` (entry+return stash,
+like `read()` — the buffer isn't populated until `SSL_read` returns). `SSL_write`/`SSL_read`
+take an opaque `SSL*` with no file descriptor anywhere in their signature, so `struct
+event` carries a `ssl_ptr` field as the connection identity for these ops instead (`fd` is
+always `-1`), and `internal/streamer`'s connection key gained a `kind` tag to keep an fd
+and an unrelated `ssl_ptr` that happen to share a numeric value from being merged into one
+buffer. `Collector.Run` merges the syscall and TLS ring buffers into one event channel, so
+every downstream stage (correlator, streamer, TUI) sees TLS events the same way it sees
+syscall ones — no protocol-specific plumbing needed past the collector. `EnableTLS`
+resolves the traced process's own loaded libssl from `/proc/<pid>/maps` (so it works
+whether the process linked the system OpenSSL or a bundled one) and attaches with
+`link.UprobeOptions{PID: ...}`, which scopes the attachment itself to that one process at
+the kernel level — stronger than the syscall tracepoints' guard-clause-only approach, since
+a call in a different process never reaches the program to be checked at all.
+
 ## Known limitations (v1)
 
 - Only `AF_INET` (IPv4) `connect()` addresses are decoded; other address families report a
@@ -210,16 +244,28 @@ freed fd must not merge its byte counts or endpoint into the previous connection
   content happens to *look* like plain text) is re-encoded as a simple string. Real Redis
   clients decode both the same way for ordinary string values, so this hasn't mattered in
   practice, but it's not a byte-exact replay of the original wire format.
+- `--tls` only fires for calls to the plain `SSL_write`/`SSL_read` symbols. Some libssl
+  callers use `SSL_write_ex`/`SSL_read_ex` instead for some or all of their traffic
+  (confirmed live: `openssl s_server`'s `-www` response path does, while `curl` and
+  `openssl s_client` call the plain functions) — such traffic isn't captured. Not a
+  fundamental limitation (the same uprobe technique applies to the `_ex` symbols), just not
+  built, since nothing in this project's own test fixtures needed it.
+- `--tls` has no TLS-level connection-close probe (no `SSL_shutdown`/`SSL_free` uprobe), so
+  every TLS connection is decoded only via streamer's end-of-trace flush, never on close —
+  see the note on this in "What this does" above about the TUI exiting before that flush
+  renders.
+- `internal/correlator`'s Connections tab has no concept of an `ssl_ptr`-keyed connection at
+  all (it only tracks `connect()`-based fd lifecycles); TLS traffic is visible in the Events
+  and HTTP tabs but never in Connections.
 
 ## Roadmap
 
-Not built yet; each is a self-contained follow-on milestone on top of the same
-`collector` → channel → stage → ... → consumer architecture:
+Not built in v1; each is a substantial follow-on beyond what this project set out to do,
+listed for context rather than as near-term plans:
 
-- **TLS uprobes**: `SSL_write`/`SSL_read` uprobes (the `SSL_read` entry+return stash reuses
-  the same pattern built for `read()` in M1) so HTTPS traffic feeds the same HTTP decoder,
-  sourcing plaintext at the TLS boundary. A known technique (Pixie's SSL tracing, bcc's
-  `sslsniff`), not a novel one.
-- Further out, explicitly out of scope even after the above: kernel-level SK_MSG/sockops
-  transparent redirection, Postgres wire-protocol decoding, automated noise/diff detection
-  across recordings, container/cgroup-aware recording.
+- Kernel-level `SK_MSG`/sockops transparent redirection (v1's replay uses a userspace env-var
+  redirect instead — see `internal/replay`).
+- Postgres wire-protocol decoding, alongside the existing HTTP/RESP2 decoders.
+- Automated noise/diff detection across recordings (e.g. flagging a replay whose response
+  differs from the original recording).
+- Container/cgroup-aware recording (tracing by cgroup rather than a single PID).

@@ -5,12 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/vidhu/etracer/internal/collector"
 	"github.com/vidhu/etracer/internal/correlator"
+	"github.com/vidhu/etracer/internal/launcher"
 	"github.com/vidhu/etracer/internal/printer"
 	"github.com/vidhu/etracer/internal/recorder"
 	"github.com/vidhu/etracer/internal/replay"
@@ -31,6 +34,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(traceCmd())
 	root.AddCommand(recordCmd())
 	root.AddCommand(runCmd())
+	root.AddCommand(launchCmd())
 	return root
 }
 
@@ -214,4 +218,53 @@ func runCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&testPath, "test", "", "path to a recorded YAML test case (required)")
 	return cmd
+}
+
+// launchCmd runs the interactive launcher menu and, once it produces a
+// result, execs the assembled command -- strictly after the launcher's own
+// bubbletea program has already torn down and restored the terminal.
+// Running the target in-process while the menu TUI is still up isn't an
+// option: trace's TUI is also bubbletea, and one bubbletea program can't
+// nest inside another without both fighting over the alt-screen. Running
+// the launcher itself unprivileged and re-execing under sudo only for the
+// modes that need it also means a sudo password prompt lands on a clean
+// terminal, and avoids trace/record's own output (and any file `record`
+// writes) coming out root-owned when the launcher didn't need to be.
+func launchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "launch",
+		Short: "Interactive menu to pick a mode and target, then run it",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, ok, err := launcher.Run()
+			if err != nil {
+				return fmt.Errorf("launcher: %w", err)
+			}
+			if !ok {
+				return nil // user quit without completing a selection
+			}
+
+			self, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolve own path: %w", err)
+			}
+
+			execPath := self
+			argv := append([]string{self}, result.Args...)
+			if result.NeedsSudo {
+				sudoPath, err := exec.LookPath("sudo")
+				if err != nil {
+					return fmt.Errorf("find sudo: %w", err)
+				}
+				execPath = sudoPath
+				argv = append([]string{sudoPath, self}, result.Args...)
+			}
+
+			fmt.Fprintln(os.Stderr, "running:", strings.Join(argv, " "))
+
+			// Everything past this point is exec semantics, not launcher
+			// logic -- syscall.Exec either replaces this process's image
+			// or returns an error; there's no in-between state left to test.
+			return syscall.Exec(execPath, argv, os.Environ())
+		},
+	}
 }

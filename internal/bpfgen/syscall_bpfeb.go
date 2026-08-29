@@ -8,16 +8,30 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type SyscallReadArgs struct {
+	_   structs.HostLayout
+	Buf uint64
+	Fd  int32
+	_   [4]byte
+}
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	SyscallMapEvents             = "events"
+	SyscallMapReadStash          = "read_stash"
+	SyscallProgTraceEnterClose   = "trace_enter_close"
 	SyscallProgTraceEnterConnect = "trace_enter_connect"
+	SyscallProgTraceEnterRead    = "trace_enter_read"
+	SyscallProgTraceEnterWrite   = "trace_enter_write"
+	SyscallProgTraceExitRead     = "trace_exit_read"
+	SyscallVarTargetPid          = "target_pid"
 )
 
 // LoadSyscall returns the embedded CollectionSpec for Syscall.
@@ -62,20 +76,26 @@ type SyscallSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type SyscallProgramSpecs struct {
+	TraceEnterClose   *ebpf.ProgramSpec `ebpf:"trace_enter_close"`
 	TraceEnterConnect *ebpf.ProgramSpec `ebpf:"trace_enter_connect"`
+	TraceEnterRead    *ebpf.ProgramSpec `ebpf:"trace_enter_read"`
+	TraceEnterWrite   *ebpf.ProgramSpec `ebpf:"trace_enter_write"`
+	TraceExitRead     *ebpf.ProgramSpec `ebpf:"trace_exit_read"`
 }
 
 // SyscallMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type SyscallMapSpecs struct {
-	Events *ebpf.MapSpec `ebpf:"events"`
+	Events    *ebpf.MapSpec `ebpf:"events"`
+	ReadStash *ebpf.MapSpec `ebpf:"read_stash"`
 }
 
 // SyscallVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type SyscallVariableSpecs struct {
+	TargetPid *ebpf.VariableSpec `ebpf:"target_pid"`
 }
 
 // SyscallObjects contains all objects after they have been loaded into the kernel.
@@ -98,12 +118,14 @@ func (o *SyscallObjects) Close() error {
 //
 // It can be passed to LoadSyscallObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SyscallMaps struct {
-	Events *ebpf.Map `ebpf:"events"`
+	Events    *ebpf.Map `ebpf:"events"`
+	ReadStash *ebpf.Map `ebpf:"read_stash"`
 }
 
 func (m *SyscallMaps) Close() error {
 	return _SyscallClose(
 		m.Events,
+		m.ReadStash,
 	)
 }
 
@@ -111,18 +133,27 @@ func (m *SyscallMaps) Close() error {
 //
 // It can be passed to LoadSyscallObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SyscallVariables struct {
+	TargetPid *ebpf.Variable `ebpf:"target_pid"`
 }
 
 // SyscallPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to LoadSyscallObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SyscallPrograms struct {
+	TraceEnterClose   *ebpf.Program `ebpf:"trace_enter_close"`
 	TraceEnterConnect *ebpf.Program `ebpf:"trace_enter_connect"`
+	TraceEnterRead    *ebpf.Program `ebpf:"trace_enter_read"`
+	TraceEnterWrite   *ebpf.Program `ebpf:"trace_enter_write"`
+	TraceExitRead     *ebpf.Program `ebpf:"trace_exit_read"`
 }
 
 func (p *SyscallPrograms) Close() error {
 	return _SyscallClose(
+		p.TraceEnterClose,
 		p.TraceEnterConnect,
+		p.TraceEnterRead,
+		p.TraceEnterWrite,
+		p.TraceExitRead,
 	)
 }
 

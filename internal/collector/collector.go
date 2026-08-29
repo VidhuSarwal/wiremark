@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -43,24 +44,51 @@ type Collector struct {
 	rd    *ringbuf.Reader
 }
 
-func New() (*Collector, error) {
+// New loads and attaches the syscall tracepoints, scoped in-kernel to pid.
+// pid must be non-zero: the BPF program's target_pid defaults to 0, which
+// matches no process, so there is no accidental system-wide tracing mode.
+func New(pid uint32) (*Collector, error) {
+	if pid == 0 {
+		return nil, fmt.Errorf("pid must be non-zero")
+	}
+
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("remove memlock rlimit: %w", err)
 	}
 
+	spec, err := bpfgen.LoadSyscall()
+	if err != nil {
+		return nil, fmt.Errorf("load bpf spec: %w", err)
+	}
+	if err := spec.Variables["target_pid"].Set(pid); err != nil {
+		return nil, fmt.Errorf("set target_pid: %w", err)
+	}
+
 	var objs bpfgen.SyscallObjects
-	if err := bpfgen.LoadSyscallObjects(&objs, nil); err != nil {
+	if err := spec.LoadAndAssign(&objs, nil); err != nil {
 		return nil, fmt.Errorf("load bpf objects: %w", err)
 	}
 
 	c := &Collector{objs: objs}
 
-	tp, err := link.Tracepoint("syscalls", "sys_enter_connect", objs.TraceEnterConnect, nil)
-	if err != nil {
-		c.Close()
-		return nil, fmt.Errorf("attach sys_enter_connect: %w", err)
+	tracepoints := []struct {
+		name string
+		prog *ebpf.Program
+	}{
+		{"sys_enter_connect", objs.TraceEnterConnect},
+		{"sys_enter_write", objs.TraceEnterWrite},
+		{"sys_enter_read", objs.TraceEnterRead},
+		{"sys_exit_read", objs.TraceExitRead},
+		{"sys_enter_close", objs.TraceEnterClose},
 	}
-	c.links = append(c.links, tp)
+	for _, tpDef := range tracepoints {
+		tp, err := link.Tracepoint("syscalls", tpDef.name, tpDef.prog, nil)
+		if err != nil {
+			c.Close()
+			return nil, fmt.Errorf("attach %s: %w", tpDef.name, err)
+		}
+		c.links = append(c.links, tp)
+	}
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {

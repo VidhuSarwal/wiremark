@@ -29,6 +29,11 @@ type Connection struct {
 	ClosedAt   time.Time
 }
 
+// RemoteAddrString renders RemoteAddr/RemotePort as "a.b.c.d:port".
+func (c Connection) RemoteAddrString() string {
+	return collector.FormatIPv4Port(c.RemoteAddr, c.RemotePort)
+}
+
 type key struct {
 	pid uint32
 	fd  int32

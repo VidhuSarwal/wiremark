@@ -46,8 +46,14 @@ func (e Event) Payload() []byte {
 // RemoteAddrString renders RemoteAddr/RemotePort as "a.b.c.d:port", valid
 // for OpConnect events with an AF_INET remote address.
 func (e Event) RemoteAddrString() string {
-	a := e.RemoteAddr
-	return fmt.Sprintf("%d.%d.%d.%d:%d", byte(a), byte(a>>8), byte(a>>16), byte(a>>24), e.RemotePort)
+	return FormatIPv4Port(e.RemoteAddr, e.RemotePort)
+}
+
+// FormatIPv4Port renders an IPv4 address (as captured from a kernel
+// sockaddr_in, i.e. little-endian byte order) and port as "a.b.c.d:port".
+// Shared with internal/correlator, which decodes the same wire format.
+func FormatIPv4Port(addr uint32, port uint16) string {
+	return fmt.Sprintf("%d.%d.%d.%d:%d", byte(addr), byte(addr>>8), byte(addr>>16), byte(addr>>24), port)
 }
 
 // Collector loads the BPF programs, attaches them, and streams decoded

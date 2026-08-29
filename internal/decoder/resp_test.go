@@ -3,6 +3,8 @@ package decoder
 import (
 	"bufio"
 	"bytes"
+	"errors"
+	"io"
 	"net/http"
 	"reflect"
 	"testing"
@@ -85,6 +87,73 @@ func TestTryRESPFiltersHandshakeKeepsRealCommand(t *testing.T) {
 func TestTryRESPOnNonRESPBytesFails(t *testing.T) {
 	if _, ok := TryRESP([]byte("GET / HTTP/1.1\r\n\r\n"), []byte("HTTP/1.1 200 OK\r\n\r\n")); ok {
 		t.Fatal("TryRESP should not recognize HTTP bytes as RESP")
+	}
+}
+
+// TestReadCommandReadsOneAtATime is the replay proxy's actual usage pattern:
+// commands arrive back-to-back on a live connection (real captures show
+// exactly this -- HELLO then two CLIENT SETINFO calls, all in one read()),
+// and the proxy must consume and reply to each one without waiting for the
+// connection to close.
+func TestReadCommandReadsOneAtATime(t *testing.T) {
+	r := bufio.NewReader(bytes.NewReader([]byte(capturedHandshakeCommands + capturedSetCommand)))
+
+	want := [][]string{
+		{"hello", "2"},
+		{"client", "setinfo", "LIB-NAME", "go-redis(,go1.26.0)"},
+		{"client", "setinfo", "LIB-VER", "9.22.0"},
+		{"set", "user:42", "Alice"},
+	}
+	for i, w := range want {
+		got, err := ReadCommand(r)
+		if err != nil {
+			t.Fatalf("ReadCommand #%d: %v", i, err)
+		}
+		if !reflect.DeepEqual(got, w) {
+			t.Errorf("ReadCommand #%d = %v, want %v", i, got, w)
+		}
+	}
+
+	if _, err := ReadCommand(r); !errors.Is(err, io.EOF) {
+		t.Errorf("ReadCommand after last command: err = %v, want io.EOF", err)
+	}
+}
+
+func TestReadCommandRejectsNonArray(t *testing.T) {
+	r := bufio.NewReader(bytes.NewReader([]byte(capturedOKReply)))
+	if _, err := ReadCommand(r); err == nil {
+		t.Fatal("ReadCommand should reject a non-array top-level value")
+	}
+}
+
+// TestEncodeReplyRoundTrips checks EncodeReply against exactly the display
+// strings RESPValue.String() produces -- it's meant to be its inverse for
+// every reply shape this project actually records.
+func TestEncodeReplyRoundTrips(t *testing.T) {
+	cases := []struct {
+		display string
+		want    string
+	}{
+		{"OK", "+OK\r\n"},
+		{"(nil)", "$-1\r\n"},
+		{"(error) WRONGTYPE bad key", "-WRONGTYPE bad key\r\n"},
+		{"(integer) 5", ":5\r\n"},
+	}
+	for _, c := range cases {
+		if got := string(EncodeReply(c.display)); got != c.want {
+			t.Errorf("EncodeReply(%q) = %q, want %q", c.display, got, c.want)
+		}
+	}
+}
+
+func TestIsAdminCommandCaseInsensitive(t *testing.T) {
+	for _, name := range []string{"HELLO", "hello", "Client", "PING"} {
+		if !IsAdminCommand(name) {
+			t.Errorf("IsAdminCommand(%q) = false, want true", name)
+		}
+	}
+	if IsAdminCommand("SET") {
+		t.Error("IsAdminCommand(\"SET\") = true, want false")
 	}
 }
 

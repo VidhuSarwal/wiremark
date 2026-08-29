@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/vidhu/etracer/internal/correlator"
 	"github.com/vidhu/etracer/internal/printer"
 	"github.com/vidhu/etracer/internal/recorder"
+	"github.com/vidhu/etracer/internal/replay"
 	"github.com/vidhu/etracer/internal/storage"
 	"github.com/vidhu/etracer/internal/streamer"
 	"github.com/vidhu/etracer/internal/tui"
@@ -28,6 +30,7 @@ func rootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "etrace"}
 	root.AddCommand(traceCmd())
 	root.AddCommand(recordCmd())
+	root.AddCommand(runCmd())
 	return root
 }
 
@@ -139,5 +142,68 @@ func recordCmd() *cobra.Command {
 	cmd.Flags().IntVar(&pid, "pid", 0, "PID to trace (required)")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "path to write the YAML test case (required)")
 	cmd.Flags().StringVar(&name, "name", "recorded-test", "name for the recorded test case")
+	return cmd
+}
+
+// runCmd replays a recorded test case's Redis dependencies while running the
+// given command -- no eBPF, no kernel-level redirection: the subprocess is
+// simply pointed at the replay proxy's address via REDIS_ADDR instead of a
+// real Redis, per the guide's stated v1 scope for M5.
+func runCmd() *cobra.Command {
+	var testPath string
+
+	cmd := &cobra.Command{
+		Use:   "run --test <path> -- <command> [args...]",
+		Short: "Run a command with its Redis dependencies served from a recorded test case",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if testPath == "" {
+				return fmt.Errorf("--test is required")
+			}
+
+			var tc recorder.TestCase
+			if err := storage.ReadYAML(testPath, &tc); err != nil {
+				return fmt.Errorf("read %s: %w", testPath, err)
+			}
+
+			var redisDeps []recorder.Dependency
+			for _, dep := range tc.Dependencies {
+				if dep.Type == "redis" {
+					redisDeps = append(redisDeps, dep)
+				}
+			}
+
+			// Bind before exec'ing the subprocess: otherwise the app's
+			// first connection attempt could race the listener coming up.
+			proxy, err := replay.NewProxy(redisDeps)
+			if err != nil {
+				return fmt.Errorf("start replay proxy: %w", err)
+			}
+			defer proxy.Close()
+			go proxy.Serve()
+
+			sub := exec.Command(args[0], args[1:]...)
+			sub.Stdout = os.Stdout
+			sub.Stderr = os.Stderr
+			sub.Stdin = os.Stdin
+			sub.Env = append(os.Environ(), "REDIS_ADDR="+proxy.Addr())
+
+			if err := sub.Start(); err != nil {
+				return fmt.Errorf("start %s: %w", args[0], err)
+			}
+
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, os.Interrupt)
+			go func() {
+				<-sigCh
+				sub.Process.Signal(os.Interrupt)
+			}()
+
+			fmt.Fprintf(os.Stderr, "replaying %d redis dependencies from %s (proxy at %s)\n", len(redisDeps), testPath, proxy.Addr())
+			return sub.Wait()
+		},
+	}
+
+	cmd.Flags().StringVar(&testPath, "test", "", "path to a recorded YAML test case (required)")
 	return cmd
 }

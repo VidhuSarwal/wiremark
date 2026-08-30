@@ -8,6 +8,9 @@ plaintext at the TLS boundary, for HTTPS traffic. This is the full v1 scope of a
 eBPF traffic-recording project (Milestones 1–5 plus TLS uprobes) — see
 [Roadmap](#roadmap) for what's deliberately out of scope even so.
 
+New to eBPF, syscalls, or this project generally? [`GUIDE.md`](GUIDE.md) explains everything
+from scratch, in plain language, before you read the reference below.
+
 Build notes, bugs, and gotchas encountered along the way (kept for a future write-up, not
 part of this reference doc) are in [`NOTES.md`](NOTES.md).
 

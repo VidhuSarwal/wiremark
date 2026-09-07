@@ -7,6 +7,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -21,15 +22,155 @@ import (
 // maxRows bounds memory for long-running traces; older rows scroll off.
 const maxRows = 500
 
+// ---- chrome palette ----
+//
+// Coloring happens by post-processing each already-rendered, already-padded
+// table line and re-styling one column's text in place -- never by putting
+// ANSI codes into a table.Row value before it reaches bubbles/table. That
+// table renders with mattn/go-runewidth, which is not ANSI-aware: it counts
+// escape bytes as visible width and truncates styled cell content into
+// broken escape sequences. Coloring after the library's own truncation and
+// padding sidesteps that entirely.
+var (
+	colorAccent = lipgloss.Color("141")
+	colorBarBg  = lipgloss.Color("236")
+	colorLive   = lipgloss.Color("84")
+	colorEnded  = lipgloss.Color("203")
+
+	colorCyan    = lipgloss.Color("51")
+	colorGreen   = lipgloss.Color("84")
+	colorYellow  = lipgloss.Color("228")
+	colorRed     = lipgloss.Color("203")
+	colorMagenta = lipgloss.Color("213")
+	colorDim     = lipgloss.Color("244")
+	colorBlue    = lipgloss.Color("111")
+)
+
 func defaultTableStyles() table.Styles {
 	s := table.DefaultStyles()
-	s.Header = s.Header.Bold(true)
+	s.Header = s.Header.Bold(true).Foreground(colorAccent)
 	s.Selected = s.Selected.Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57"))
 	return s
 }
 
-func faint(s string) string {
-	return lipgloss.NewStyle().Faint(true).Render(s)
+// columnStart returns the offset (in runes) of column idx's content within a
+// rendered table line, and its content width. It mirrors bubbles/table's own
+// layout math exactly: DefaultStyles' Cell/Header styles carry Padding(0, 1),
+// so each column occupies col.Width+2 runes, with content starting 1 rune
+// in from the column's left edge.
+func columnStart(cols []table.Column, idx int) (offset, width int) {
+	pos := 0
+	for i, c := range cols {
+		if i == idx {
+			return pos + 1, c.Width
+		}
+		pos += c.Width + 2
+	}
+	return -1, 0
+}
+
+// colorizeAt re-renders the content in line[offset:offset+width] (trimming
+// trailing pad spaces first, so the injected escape codes never touch the
+// padding bubbles/table already computed) in the given color, leaving every
+// other rune -- including that padding -- untouched.
+func colorizeAt(line string, offset, width int, color lipgloss.Color) string {
+	runes := []rune(line)
+	if offset < 0 || width <= 0 || offset+width > len(runes) {
+		return line
+	}
+	cell := string(runes[offset : offset+width])
+	trimmed := strings.TrimRight(cell, " ")
+	if trimmed == "" {
+		return line
+	}
+	pad := cell[len(trimmed):]
+	styled := lipgloss.NewStyle().Foreground(color).Render(trimmed)
+	return string(runes[:offset]) + styled + pad + string(runes[offset+width:])
+}
+
+// colorizeColumn applies colorFn (given the trimmed cell text) to column
+// colIdx of every data row in a rendered table.View() string, skipping the
+// header line.
+func colorizeColumn(view string, cols []table.Column, colIdx int, colorFn func(string) lipgloss.Color) string {
+	offset, width := columnStart(cols, colIdx)
+	if offset < 0 {
+		return view
+	}
+	lines := strings.Split(view, "\n")
+	for i := 1; i < len(lines); i++ {
+		runes := []rune(lines[i])
+		if offset+width > len(runes) {
+			continue
+		}
+		token := strings.TrimSpace(string(runes[offset : offset+width]))
+		if token == "" {
+			continue
+		}
+		lines[i] = colorizeAt(lines[i], offset, width, colorFn(token))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func opColor(op string) lipgloss.Color {
+	switch {
+	case strings.HasPrefix(op, "CONNECT"):
+		return colorCyan
+	case strings.HasPrefix(op, "READ"):
+		return colorGreen
+	case strings.HasPrefix(op, "WRITE"):
+		return colorYellow
+	case strings.HasPrefix(op, "CLOSE"):
+		return colorDim
+	case strings.HasPrefix(op, "SSL_"):
+		return colorMagenta
+	default:
+		return colorDim
+	}
+}
+
+func methodColor(method string) lipgloss.Color {
+	switch method {
+	case "GET":
+		return colorBlue
+	case "POST", "PUT", "PATCH":
+		return colorGreen
+	case "DELETE":
+		return colorRed
+	default:
+		return colorDim
+	}
+}
+
+func statusColor(status string) lipgloss.Color {
+	if status == "" || status == "-" {
+		return colorDim
+	}
+	switch status[0] {
+	case '2':
+		return colorGreen
+	case '3':
+		return colorBlue
+	case '4':
+		return colorYellow
+	case '5':
+		return colorRed
+	default:
+		return colorDim
+	}
+}
+
+func stateColor(state string) lipgloss.Color {
+	if state == "open" {
+		return colorGreen
+	}
+	return colorDim
+}
+
+func truncColor(v string) lipgloss.Color {
+	if v == "yes" {
+		return colorYellow
+	}
+	return colorDim
 }
 
 // ---- events tab: the flat M1 log, unchanged behavior ----
@@ -99,11 +240,8 @@ func (m eventsTab) update(msg tea.Msg) (eventsTab, tea.Cmd) {
 	return m, cmd
 }
 
-func (m eventsTab) view(footer string) string {
-	if m.closed {
-		footer = "trace ended -- " + footer
-	}
-	return m.table.View() + "\n" + faint(footer)
+func (m eventsTab) view() string {
+	return colorizeColumn(m.table.View(), m.table.Columns(), 4, opColor)
 }
 
 func eventRow(ev collector.Event, t time.Time) table.Row {
@@ -217,11 +355,8 @@ func (m connsTab) update(msg tea.Msg) (connsTab, tea.Cmd) {
 	return m, cmd
 }
 
-func (m connsTab) view(footer string) string {
-	if m.closed {
-		footer = "trace ended -- " + footer
-	}
-	return m.table.View() + "\n" + faint(footer)
+func (m connsTab) view() string {
+	return colorizeColumn(m.table.View(), m.table.Columns(), 6, stateColor)
 }
 
 func connRow(c correlator.Connection) table.Row {
@@ -310,11 +445,12 @@ func (m httpTab) update(msg tea.Msg) (httpTab, tea.Cmd) {
 	return m, cmd
 }
 
-func (m httpTab) view(footer string) string {
-	if m.closed {
-		footer = "trace ended -- " + footer
-	}
-	return m.table.View() + "\n" + faint(footer)
+func (m httpTab) view() string {
+	v := m.table.View()
+	v = colorizeColumn(v, m.table.Columns(), 2, methodColor)
+	v = colorizeColumn(v, m.table.Columns(), 4, statusColor)
+	v = colorizeColumn(v, m.table.Columns(), 6, truncColor)
+	return v
 }
 
 func httpRow(ex streamer.Exchange) table.Row {
@@ -349,7 +485,7 @@ func httpRow(ex streamer.Exchange) table.Row {
 	}
 }
 
-// ---- top-level model: tabs between the views above ----
+// ---- top-level model: tabs between the views above, plus chrome ----
 
 type tab int
 
@@ -366,6 +502,8 @@ type Model struct {
 	events eventsTab
 	conns  connsTab
 	http   httpTab
+	width  int
+	height int
 }
 
 func newModel(rawEvents <-chan collector.Event, conns <-chan correlator.Connection, exchanges <-chan streamer.Exchange, timeOf func(collector.Event) time.Time) Model {
@@ -373,12 +511,20 @@ func newModel(rawEvents <-chan collector.Event, conns <-chan correlator.Connecti
 		events: newEventsTab(rawEvents, timeOf),
 		conns:  newConnsTab(conns),
 		http:   newHTTPTab(exchanges),
+		width:  80,
+		height: 24,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.events.init(), m.conns.init(), m.http.init())
 }
+
+// chromeHeight is how many lines the border, title bar, tab bar, and footer
+// bar consume beyond the active tab's table (which renders its own header
+// line as part of table.View()).
+const chromeHeight = 2 /* border */ + 1 /* title */ + 1 /* tabs */ + 1 /* footer */
+const chromeWidth = 4 /* border + inner padding, both sides */
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyMsg); ok {
@@ -391,12 +537,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		h := size.Height - 4
-		m.events.table.SetWidth(size.Width)
+		m.width, m.height = size.Width, size.Height
+		w := size.Width - chromeWidth
+		h := size.Height - chromeHeight
+		if w < 1 {
+			w = 1
+		}
+		if h < 1 {
+			h = 1
+		}
+		m.events.table.SetWidth(w)
 		m.events.table.SetHeight(h)
-		m.conns.table.SetWidth(size.Width)
+		m.conns.table.SetWidth(w)
 		m.conns.table.SetHeight(h)
-		m.http.table.SetWidth(size.Width)
+		m.http.table.SetWidth(w)
 		m.http.table.SetHeight(h)
 	}
 
@@ -410,30 +564,83 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds[0], cmds[1], cmds[2])
 }
 
-func (m Model) View() string {
-	const footer = "tab: switch view  q: quit"
-
-	var header string
-	for i, name := range tabNames {
-		if i > 0 {
-			header += " "
-		}
-		if tab(i) == m.active {
-			name = lipgloss.NewStyle().Underline(true).Render(name)
-		}
-		header += "[" + name + "]"
+// barWidth is the interior width available to the title/tab/footer bars,
+// i.e. the terminal width minus the outer border and its padding.
+func (m Model) barWidth() int {
+	w := m.width - chromeWidth
+	if w < 1 {
+		w = 1
 	}
+	return w
+}
+
+func titleBar(width int, live bool) string {
+	status, statusFg := "● LIVE", colorLive
+	if !live {
+		status, statusFg = "● trace ended", colorEnded
+	}
+	leftStyle := lipgloss.NewStyle().Background(colorBarBg).Foreground(lipgloss.Color("255")).Bold(true)
+	rightStyle := lipgloss.NewStyle().Background(colorBarBg).Foreground(statusFg).Bold(true)
+	fillStyle := lipgloss.NewStyle().Background(colorBarBg)
+
+	left := leftStyle.Render(" eTraceReplay ")
+	right := rightStyle.Render(status + " ")
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 0 {
+		gap = 0
+	}
+	return left + fillStyle.Render(strings.Repeat(" ", gap)) + right
+}
+
+func tabBar(width int, active tab) string {
+	activeStyle := lipgloss.NewStyle().Background(colorAccent).Foreground(lipgloss.Color("235")).Bold(true).Padding(0, 2)
+	inactiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Padding(0, 2)
+
+	var parts []string
+	for i, name := range tabNames {
+		if tab(i) == active {
+			parts = append(parts, activeStyle.Render(name))
+		} else {
+			parts = append(parts, inactiveStyle.Render(name))
+		}
+	}
+	return lipgloss.NewStyle().Width(width).Render(strings.Join(parts, " "))
+}
+
+func footerBar(width int) string {
+	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("235")).Background(colorAccent).Padding(0, 1)
+	descStyle := lipgloss.NewStyle().Foreground(colorDim)
+	line := keyStyle.Render("TAB") + descStyle.Render(" switch view    ") +
+		keyStyle.Render("Q") + descStyle.Render(" quit")
+	return lipgloss.NewStyle().Width(width).Render(line)
+}
+
+func (m Model) View() string {
+	width := m.barWidth()
 
 	var body string
+	var live bool
 	switch m.active {
 	case tabConnections:
-		body = m.conns.view(footer)
+		body, live = m.conns.view(), !m.conns.closed
 	case tabHTTP:
-		body = m.http.view(footer)
+		body, live = m.http.view(), !m.http.closed
 	default:
-		body = m.events.view(footer)
+		body, live = m.events.view(), !m.events.closed
 	}
-	return header + "\n" + body
+
+	inner := strings.Join([]string{
+		titleBar(width, live),
+		tabBar(width, m.active),
+		body,
+		footerBar(width),
+	}, "\n")
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorAccent).
+		Padding(0, 1).
+		Render(inner)
 }
 
 // Run launches the interactive TUI, blocking until the user quits or all

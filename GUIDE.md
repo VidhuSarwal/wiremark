@@ -6,10 +6,6 @@ uses. If you already know that stuff, read [`README.md`](README.md) instead — 
 precise technical reference. This document is the "why does any of this exist and how does
 it actually work" version, written to be read start to finish.
 
-`NOTES.md` is a third document, for later: it's the messy, honest log of every bug and wrong
-assumption hit while building this, kept for a future blog post. Read it once this one makes
-sense and you're curious about the "how did you actually find that out" details.
-
 ---
 
 ## 1. What problem does this solve?
@@ -93,9 +89,9 @@ one program). So before the kernel will run your eBPF program, it runs it throug
 called the **verifier**: a static checker that proves your program can't do anything unsafe
 (no infinite loops, no out-of-bounds memory access, etc.) before it's ever allowed to
 execute. If your program fails that check, it simply doesn't load — the kernel refuses it,
-rather than running something potentially dangerous. You'll see this mentioned in
-`NOTES.md` as a real thing that happened during development: a buggy eBPF program got
-rejected at load time with an error message, not a kernel crash.
+rather than running something potentially dangerous. This actually happened during this
+project's development: a buggy eBPF program got rejected at load time with an error
+message, not a kernel crash.
 
 This project's eBPF programs are written in a restricted subset of C (that's what the `.bpf.c`
 files in the `bpf/` directory are), compiled with `clang`, and loaded from a normal Go
@@ -201,9 +197,8 @@ would fire constantly, for every program on your computer, all the time — a fl
 irrelevant data, and a real performance/safety concern if left running. This project always
 scopes tracing down to **one PID** you specify — the eBPF program itself checks "is this the
 one process I care about?" before doing anything, right at the start, for every single event.
-(In `NOTES.md` there's a war story about what happens if you get this wrong: an early,
-unfiltered version of this accidentally captured 77 megabytes of unrelated system traffic in
-a few seconds.)
+(An early, unfiltered version of this accidentally captured 77 megabytes of unrelated system
+traffic in a few seconds — a real problem hit during development, not a hypothetical one.)
 
 ---
 
@@ -375,6 +370,3 @@ recording is actually self-sufficient.
 
 - **`README.md`** — the precise technical reference: exact commands, exact architecture,
   every known limitation spelled out.
-- **`NOTES.md`** — the development diary: every bug found, how it was diagnosed, and what it
-  taught. Read this once the above makes sense and you want the "how do you actually debug
-  something like this" story.

@@ -8,7 +8,7 @@ package correlator
 import (
 	"time"
 
-	"github.com/vidhu/etracer/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/collector"
 )
 
 // Connection is a snapshot of one socket's state at the time of the event

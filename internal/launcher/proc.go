@@ -1,6 +1,6 @@
 // Package launcher provides an interactive TUI menu for picking a mode
 // (trace/record/run) and a target (PID, output path, or YAML+command), then
-// handing back the assembled command-line args for cmd/etrace to exec.
+// handing back the assembled command-line args for cmd/wiremark to exec.
 package launcher
 
 import (

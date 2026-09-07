@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vidhu/etracer/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/collector"
 )
 
 func fixedTimeOf(collector.Event) time.Time {

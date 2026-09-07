@@ -10,10 +10,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/vidhu/etracer/internal/collector"
-	"github.com/vidhu/etracer/internal/correlator"
-	"github.com/vidhu/etracer/internal/decoder"
-	"github.com/vidhu/etracer/internal/streamer"
+	"github.com/vidhusarwal/wiremark/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/correlator"
+	"github.com/vidhusarwal/wiremark/internal/decoder"
+	"github.com/vidhusarwal/wiremark/internal/streamer"
 )
 
 // fixedTime lets tests assert on exact rendered timestamps.

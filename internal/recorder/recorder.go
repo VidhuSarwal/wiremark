@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/vidhu/etracer/internal/streamer"
+	"github.com/vidhusarwal/wiremark/internal/streamer"
 )
 
 // TestCase mirrors the build guide's YAML schema:

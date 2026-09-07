@@ -6,7 +6,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/vidhu/etracer/internal/recorder"
+	"github.com/vidhusarwal/wiremark/internal/recorder"
 )
 
 // TestProxyServesRecordedSET is the M5 gate: a real go-redis client must be

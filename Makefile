@@ -4,11 +4,11 @@ generate:
 	go generate ./...
 
 build: generate
-	go build -o etrace ./cmd/etrace
+	go build -o wiremark ./cmd/wiremark
 
 test:
 	go test ./...
 
 clean:
-	rm -f etrace
+	rm -f wiremark
 	rm -f internal/bpfgen/*.o

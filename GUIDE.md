@@ -1,4 +1,4 @@
-# eTraceReplay, explained from scratch
+# Wiremark, explained from scratch
 
 This document assumes you know how to use a terminal and a little bit of programming, but
 nothing about eBPF, syscalls, kernel tracing, or any of the specific jargon this project
@@ -27,9 +27,9 @@ The server can't tell the difference — it made the same call, in the same form
 response that looks the same. Your test runs fast, doesn't need a database, and is
 deterministic (same input, same output, every time).
 
-That's what eTraceReplay does, for one specific case: an HTTP server whose only dependency
-is Redis (a simple key-value database). `etrace record` watches one request go through your
-server and writes down everything it saw. `etrace run` reads that recording back and pretends
+That's what Wiremark does, for one specific case: an HTTP server whose only dependency
+is Redis (a simple key-value database). `wiremark record` watches one request go through your
+server and writes down everything it saw. `wiremark run` reads that recording back and pretends
 to be Redis, so you can run your server against the recording instead of a real Redis.
 
 The interesting part — and the reason this project exists rather than just being "write a
@@ -109,7 +109,7 @@ uses two kinds:
 - A **tracepoint** is a fixed instrumentation point the kernel itself already provides — for
   example, "right when any process calls `read()`." This project attaches to the
   tracepoints for `connect`, `write`, `read`, and `close`. This is how the plain HTTP/Redis
-  tracing (`etrace trace`, `etrace record`) works.
+  tracing (`wiremark trace`, `wiremark record`) works.
 - A **uprobe** (userspace probe) is similar, but instead of a kernel-provided event, you
   point it at a specific function *inside a specific program's own code* — for example, "the
   `SSL_write` function inside this process's copy of the OpenSSL library." This is how the
@@ -190,7 +190,7 @@ replied with `201 Created` and a JSON body.
 Most command-line tools just print lines of text and stop. A **TUI** (Terminal User
 Interface) is a program that takes over the whole terminal window to draw an interactive
 display — tables, tabs, highlighting, things you navigate with arrow keys — while still
-running in a plain terminal, no graphics needed. This project's live-tracing view (`etrace
+running in a plain terminal, no graphics needed. This project's live-tracing view (`wiremark
 trace`) is a TUI with three tabs you switch between with the `Tab` key. It's built using a Go
 library called `bubbletea`.
 
@@ -209,12 +209,12 @@ a few seconds.)
 
 ## 3. What the tool actually does, command by command
 
-The compiled program is a single binary, `etrace`, with several subcommands.
+The compiled program is a single binary, `wiremark`, with several subcommands.
 
-### `etrace trace` — watch a process live
+### `wiremark trace` — watch a process live
 
 ```bash
-sudo ./etrace trace --pid 12345
+sudo ./wiremark trace --pid 12345
 ```
 
 Attaches to PID 12345 and shows you a live, scrolling view of everything it does on the
@@ -227,20 +227,20 @@ Add `--no-tui` for a plain scrolling text log instead of the interactive display
 piping into `grep` or redirecting to a file), or `--tls` to also decrypt HTTPS traffic for
 processes that use OpenSSL directly (see the eBPF section above).
 
-### `etrace record` — capture one request as a test case
+### `wiremark record` — capture one request as a test case
 
 ```bash
-sudo ./etrace record --pid 12345 -o test.yaml
+sudo ./wiremark record --pid 12345 -o test.yaml
 ```
 
 Watches PID 12345 the same way, but instead of showing you a live view, it waits until you
 press Ctrl-C, then writes down everything it understood as one structured YAML file: the one
 HTTP request/response it saw, and any Redis commands the server made while handling it.
 
-### `etrace run` — replay a test case without the real dependency
+### `wiremark run` — replay a test case without the real dependency
 
 ```bash
-./etrace run --test test.yaml -- ./your-server
+./wiremark run --test test.yaml -- ./your-server
 ```
 
 Reads `test.yaml` back, starts a small stand-in Redis server (just for the commands and
@@ -251,10 +251,10 @@ from the recording, and the real Redis doesn't even need to exist. This is the o
 that doesn't need `sudo`: there's no eBPF here at all, just an ordinary network server
 written in Go.
 
-### `etrace launch` — an interactive menu, if you don't want to remember flags
+### `wiremark launch` — an interactive menu, if you don't want to remember flags
 
 ```bash
-./etrace launch
+./wiremark launch
 ```
 
 A menu-driven front end for all of the above: pick a mode with arrow keys, pick a target
@@ -311,7 +311,7 @@ of running a real trace, and check what comes out the other end. Only a small nu
 tests actually need `sudo` and a live kernel — the ones that check the eBPF programs
 themselves work correctly.
 
-`etrace record` and `etrace run` don't go through the TUI at all — `record` chains
+`wiremark record` and `wiremark run` don't go through the TUI at all — `record` chains
 `collector → streamer` directly (it wants the decoded Exchange list to build a YAML file
 from, not a live display), and `run` doesn't touch the trace pipeline whatsoever — it's a
 completely separate, ordinary network proxy that happens to read the YAML file `record`
@@ -333,7 +333,7 @@ go build -o /tmp/go-http-app ./examples/go-http-app
 APP_PID=$!
 
 # Watch it live — you're about to see every network syscall it makes
-sudo ./etrace trace --pid $APP_PID
+sudo ./wiremark trace --pid $APP_PID
 ```
 
 In another terminal, run `curl http://127.0.0.1:18099/medium`. In the TUI, you'll see (on

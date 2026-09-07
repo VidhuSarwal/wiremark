@@ -14,9 +14,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/vidhu/etracer/internal/collector"
-	"github.com/vidhu/etracer/internal/correlator"
-	"github.com/vidhu/etracer/internal/streamer"
+	"github.com/vidhusarwal/wiremark/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/correlator"
+	"github.com/vidhusarwal/wiremark/internal/streamer"
 )
 
 // maxRows bounds memory for long-running traces; older rows scroll off.
@@ -583,7 +583,7 @@ func titleBar(width int, live bool) string {
 	rightStyle := lipgloss.NewStyle().Background(colorBarBg).Foreground(statusFg).Bold(true)
 	fillStyle := lipgloss.NewStyle().Background(colorBarBg)
 
-	left := leftStyle.Render(" eTraceReplay ")
+	left := leftStyle.Render(" Wiremark ")
 	right := rightStyle.Render(status + " ")
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {

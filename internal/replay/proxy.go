@@ -2,7 +2,7 @@
 // stands in for a real Redis instance, serving a recorded test case's
 // dependency replies instead. No eBPF and no kernel-level redirection is
 // involved -- the app is simply pointed at this proxy's address instead of a
-// real Redis (see cmd/etrace's run command), matching the guide's stated v1
+// real Redis (see cmd/wiremark's run command), matching the guide's stated v1
 // scope ("no kernel redirect yet").
 package replay
 
@@ -12,8 +12,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/vidhu/etracer/internal/decoder"
-	"github.com/vidhu/etracer/internal/recorder"
+	"github.com/vidhusarwal/wiremark/internal/decoder"
+	"github.com/vidhusarwal/wiremark/internal/recorder"
 )
 
 // Proxy answers a real Redis client's connection handshake (HELLO, CLIENT

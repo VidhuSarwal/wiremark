@@ -14,7 +14,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
 
-	"github.com/vidhu/etracer/internal/bpfgen"
+	"github.com/vidhusarwal/wiremark/internal/bpfgen"
 )
 
 const (

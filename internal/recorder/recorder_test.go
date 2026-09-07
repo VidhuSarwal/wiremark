@@ -5,8 +5,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/vidhu/etracer/internal/decoder"
-	"github.com/vidhu/etracer/internal/streamer"
+	"github.com/vidhusarwal/wiremark/internal/decoder"
+	"github.com/vidhusarwal/wiremark/internal/streamer"
 )
 
 func TestBuildPartitionsHTTPAndRedis(t *testing.T) {

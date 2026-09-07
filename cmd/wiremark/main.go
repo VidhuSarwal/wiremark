@@ -11,15 +11,15 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/vidhu/etracer/internal/collector"
-	"github.com/vidhu/etracer/internal/correlator"
-	"github.com/vidhu/etracer/internal/launcher"
-	"github.com/vidhu/etracer/internal/printer"
-	"github.com/vidhu/etracer/internal/recorder"
-	"github.com/vidhu/etracer/internal/replay"
-	"github.com/vidhu/etracer/internal/storage"
-	"github.com/vidhu/etracer/internal/streamer"
-	"github.com/vidhu/etracer/internal/tui"
+	"github.com/vidhusarwal/wiremark/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/correlator"
+	"github.com/vidhusarwal/wiremark/internal/launcher"
+	"github.com/vidhusarwal/wiremark/internal/printer"
+	"github.com/vidhusarwal/wiremark/internal/recorder"
+	"github.com/vidhusarwal/wiremark/internal/replay"
+	"github.com/vidhusarwal/wiremark/internal/storage"
+	"github.com/vidhusarwal/wiremark/internal/streamer"
+	"github.com/vidhusarwal/wiremark/internal/tui"
 )
 
 func main() {
@@ -30,7 +30,7 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
-	root := &cobra.Command{Use: "etrace"}
+	root := &cobra.Command{Use: "wiremark"}
 	root.AddCommand(traceCmd())
 	root.AddCommand(recordCmd())
 	root.AddCommand(runCmd())

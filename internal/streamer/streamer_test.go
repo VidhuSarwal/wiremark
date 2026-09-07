@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vidhu/etracer/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/collector"
 )
 
 // Same literal captured bytes used in internal/decoder's gate tests --

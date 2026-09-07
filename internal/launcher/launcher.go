@@ -23,7 +23,7 @@ const (
 	ModeRun
 )
 
-// Result is the assembled command the launcher hands back to cmd/etrace to
+// Result is the assembled command the launcher hands back to cmd/wiremark to
 // exec once the interactive flow completes. Args are the arguments to
 // etrace itself (not including argv[0]).
 type Result struct {

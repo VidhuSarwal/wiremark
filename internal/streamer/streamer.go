@@ -7,8 +7,8 @@
 package streamer
 
 import (
-	"github.com/vidhu/etracer/internal/collector"
-	"github.com/vidhu/etracer/internal/decoder"
+	"github.com/vidhusarwal/wiremark/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/decoder"
 )
 
 // Protocol identifies what a decoded Exchange turned out to be.

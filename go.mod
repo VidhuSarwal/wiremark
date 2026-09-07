@@ -1,4 +1,4 @@
-module github.com/vidhu/etracer
+module github.com/vidhusarwal/wiremark
 
 go 1.25.0
 

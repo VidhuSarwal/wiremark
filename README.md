@@ -1,4 +1,4 @@
-# eTraceReplay
+# Wiremark
 
 A per-PID syscall/socket tracer built on eBPF (CO-RE via `cilium/ebpf` + `bpf2go`), with a
 `bubbletea` TUI, that can record a traced HTTP request and its Redis dependencies as a
@@ -16,17 +16,17 @@ part of this reference doc) are in [`NOTES.md`](NOTES.md).
 
 ## What this does
 
-Given a PID, `etrace trace` attaches BPF tracepoints on `connect`, `write`, `read`, and
+Given a PID, `wiremark trace` attaches BPF tracepoints on `connect`, `write`, `read`, and
 `close`, scoped **in-kernel** to that one process (a `target_pid` rodata constant checked
 at the top of every probe — tracing is never system-wide), and streams the decoded events
 either to a live terminal UI or as plain text.
 
 ```
-sudo ./etrace trace --pid <pid>            # interactive TUI (default)
-sudo ./etrace trace --pid <pid> --no-tui   # plain-text stream
-sudo ./etrace trace --pid <pid> --tls      # also decode SSL_write/SSL_read plaintext
-sudo ./etrace record --pid <pid> -o test.yaml   # record one HTTP request + Redis deps as YAML
-./etrace run --test test.yaml -- ./your-app     # replay: your-app's Redis deps are served
+sudo ./wiremark trace --pid <pid>            # interactive TUI (default)
+sudo ./wiremark trace --pid <pid> --no-tui   # plain-text stream
+sudo ./wiremark trace --pid <pid> --tls      # also decode SSL_write/SSL_read plaintext
+sudo ./wiremark record --pid <pid> -o test.yaml   # record one HTTP request + Redis deps as YAML
+./wiremark run --test test.yaml -- ./your-app     # replay: your-app's Redis deps are served
                                                  # from test.yaml, no real Redis needed
 ```
 
@@ -39,13 +39,13 @@ runtimes' TLS stacks do.
 ### Interactive launcher
 
 Not sure which command/flags/PID you want, or just want to point-and-click instead of
-typing a full invocation? `etrace launch` is a `bubbletea` menu that picks a mode first
+typing a full invocation? `wiremark launch` is a `bubbletea` menu that picks a mode first
 (the four `trace`/`record` variants above, or a `run` replay), then walks through only
 the inputs that mode actually needs — a PID (filterable, type to narrow a long process
 list), an output path, or a YAML file plus a command to exec:
 
 ```
-./etrace launch
+./wiremark launch
 ```
 
 It doesn't run anything itself: once you confirm a selection, it tears down its own UI,
@@ -63,9 +63,9 @@ get a TUI tab — see Architecture). **Note:** a connection never closed during 
 every TLS connection, plus a pooled/keep-alive plain socket — only decodes at the
 end-of-trace flush, which quitting the TUI happens *before*, so it never populates the HTTP
 tab; its raw traffic still appears live in the Events tab (plaintext, for TLS). Use
-`--no-tui` or `etrace record` to see the decoded form for those.
+`--no-tui` or `wiremark record` to see the decoded form for those.
 
-`etrace record` runs until `Ctrl-C`, then writes a YAML test case built from what it saw
+`wiremark record` runs until `Ctrl-C`, then writes a YAML test case built from what it saw
 during that window — matching the guide's schema:
 
 ```yaml
@@ -87,10 +87,10 @@ response:
         name: Alice
 ```
 
-`etrace run` reads that YAML back and stands in for the real Redis: it starts a userspace
+`wiremark run` reads that YAML back and stands in for the real Redis: it starts a userspace
 RESP2 proxy for the recorded `type: redis` dependencies, points the given command at it via
 a `REDIS_ADDR` environment variable, and execs it. Stopping the real Redis first and running
-`curl -X POST /users` again through `etrace run` returns the identical recorded response —
+`curl -X POST /users` again through `wiremark run` returns the identical recorded response —
 the app never notices its dependency is offline. No eBPF is involved in replay at all; it's
 plain userspace proxying, and no root is required.
 
@@ -99,13 +99,13 @@ Root (or `CAP_BPF`+`CAP_PERFMON`) is required to load BPF programs (`trace`/`rec
 ## Building
 
 Requires: Go 1.21+, clang/llvm, `libbpf-dev`, `bpftool`, and kernel BTF
-(`/sys/kernel/btf/vmlinux` must exist). `etrace record`'s Redis decoding only needs a Redis
+(`/sys/kernel/btf/vmlinux` must exist). `wiremark record`'s Redis decoding only needs a Redis
 instance at trace time (e.g. `redis-server --save "" --appendonly no`, stopped again after
 — this project doesn't install or run Redis as a standing service), not to build or test.
 
 ```
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
-make build     # regenerates BPF bindings (bpf2go) and builds ./etrace
+make build     # regenerates BPF bindings (bpf2go) and builds ./wiremark
 make test      # unit + headless TUI tests, no root required
 ```
 
@@ -150,7 +150,7 @@ decoder needs `accept()` tracking to identify a traced server's inbound sockets:
 buffers every fd's bytes regardless of how the socket was established, and content alone
 determines what protocol (if any) it's carrying.
 
-`etrace record` chains `collector → streamer` directly (it needs the `Exchange` stream, not
+`wiremark record` chains `collector → streamer` directly (it needs the `Exchange` stream, not
 the TUI's `Connection` view) and calls `internal/recorder.Build` on everything the streamer
 decoded during the trace: the first HTTP exchange observed becomes the recorded
 request/response, every Redis call across every Redis exchange becomes a dependency, in
@@ -160,19 +160,19 @@ time scope (see Known limitations). `internal/storage` is a deliberately generic
 read/write helper with no knowledge of the `TestCase` shape.
 
 Streamer decodes on `close()`, or on whatever's still buffered when the trace ends —
-added for `etrace record`, since connection-pooling clients like `go-redis` never call
+added for `wiremark record`, since connection-pooling clients like `go-redis` never call
 `close()` on a connection they intend to reuse. Without this, Redis traffic would be
 captured perfectly on the wire and then silently produce nothing.
 
 `internal/replay` is the read side of the same schema `internal/recorder` writes: it holds
-no eBPF, no channels, and no relationship to the trace pipeline above at all — `etrace run`
+no eBPF, no channels, and no relationship to the trace pipeline above at all — `wiremark run`
 loads a YAML file directly and starts a `replay.Proxy` that speaks just enough RESP2 to (1)
 tolerate a real client's connection handshake (`HELLO`, `CLIENT SETINFO`, ...) with a
 syntactically valid RESP error reply, since those commands were filtered out of the
 recording by `decoder.IsAdminCommand` and have no recorded reply to give back, and (2) match
 a real command against the recorded dependency list by exact, case-insensitive text and
 reply with `decoder.EncodeReply` — the inverse of the `RESPValue.String()` rendering
-`TryRESP` used to store the reply as a plain string in the first place. `etrace run` execs
+`TryRESP` used to store the reply as a plain string in the first place. `wiremark run` execs
 the given command with `REDIS_ADDR` pointing at the proxy; the app's own code is unaware
 it's talking to anything but Redis.
 
@@ -204,7 +204,7 @@ a call in a different process never reaches the program to be checked at all.
 `internal/launcher` has no relationship to any of the above beyond assembling command-line
 args for it: a `bubbletea` model, given a `[]Process` and a YAML-path default (never reading
 `/proc` or the filesystem itself, matching the rest of the TUI's testability pattern), walks
-a mode-first flow to a `Result{Args, NeedsSudo}` and quits. `cmd/etrace`'s `launch` command
+a mode-first flow to a `Result{Args, NeedsSudo}` and quits. `cmd/wiremark`'s `launch` command
 runs that to completion, lets its `tea.Program` fully tear down, then `syscall.Exec`s the
 assembled command — never in-process, and never while its own UI is still on screen (`trace`
 launched from the menu runs its own `bubbletea` program, and one can't nest inside another
@@ -248,14 +248,14 @@ without both fighting over the alt-screen).
   richer types (maps, null, boolean) entirely. A traced app that negotiates RESP3 and
   receives a map-typed reply would fail to decode that reply (the command would still be
   recognized; only reply rendering would fail).
-- `etrace record` only recognizes commands that arrive as RESP arrays of bulk strings
+- `wiremark record` only recognizes commands that arrive as RESP arrays of bulk strings
   (`*N\r\n$...`), which is how every real Redis client sends them — this is a correctness
   assumption, not a scope cut, but worth knowing if you ever craft RESP by hand.
 - `recorder.Build` records only the *first* HTTP exchange seen per recording and treats
   every Redis exchange as a dependency of it, with no way to tell "this Redis call belongs
   to a *different*, later HTTP request" — matches the single-request-at-a-time scope, but
-  means `etrace record` isn't meant to be left running across multiple requests.
-- `etrace run`'s proxy matches an incoming command against a recorded dependency by exact,
+  means `wiremark record` isn't meant to be left running across multiple requests.
+- `wiremark run`'s proxy matches an incoming command against a recorded dependency by exact,
   case-insensitive text (`strings.Join(cmd, " ")`) — a command with different argument
   values than what was recorded (e.g. `set user:42 Bob` when the recording has
   `set user:42 Alice`) gets a "no recorded reply" RESP error, not a fuzzy or parameterized
@@ -285,9 +285,9 @@ without both fighting over the alt-screen).
 - `internal/correlator`'s Connections tab has no concept of an `ssl_ptr`-keyed connection at
   all (it only tracks `connect()`-based fd lifecycles); TLS traffic is visible in the Events
   and HTTP tabs but never in Connections.
-- `etrace launch`'s `run` mode splits the command-to-exec on whitespace (`strings.Fields`),
+- `wiremark launch`'s `run` mode splits the command-to-exec on whitespace (`strings.Fields`),
   not a shell-aware tokenizer — a command whose arguments need quoting (spaces, globs) won't
-  parse correctly. Type the full `etrace run --test ... -- <command>` invocation directly for
+  parse correctly. Type the full `wiremark run --test ... -- <command>` invocation directly for
   those cases; the launcher is a convenience path for the common one, not a shell.
 
 ## Roadmap

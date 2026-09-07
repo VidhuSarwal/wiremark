@@ -8,7 +8,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/vidhu/etracer/internal/collector"
+	"github.com/vidhusarwal/wiremark/internal/collector"
 )
 
 // Format renders a single event as one plain-text line. t is the event's

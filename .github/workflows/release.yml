@@ -33,6 +33,19 @@ jobs:
             -o "dist/${name}" ./cmd/wiremark
           ( cd dist && sha256sum "${name}" > "${name}.sha256" )
 
+      - name: Package .deb
+        env:
+          ARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+          BINARY: dist/wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          VERSION="${VERSION#v}" \
+            "$(go env GOPATH)/bin/nfpm" package --config nfpm.yaml --packager deb \
+              --target "dist/wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}.deb"
+          ( cd dist && sha256sum "wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}.deb" \
+              > "wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}.deb.sha256" )
+
       - uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.goarch }}

@@ -1,8 +1,21 @@
 # Wiremark
 
-**Record a real application interaction once. Replay it later without the dependency.**
+[![release](https://img.shields.io/github/v/release/VidhuSarwal/wiremark?label=release)](https://github.com/VidhuSarwal/wiremark/releases)
+[![go](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-linux-lightgrey)](#development)
+
+**See what your app actually talked to.**
+
+Record a real HTTP request and the Redis calls behind it. Replay the same interaction later — without Redis running.
+
+```bash
+curl wiremark.vidhux.dev/install | sh
+```
 
 Wiremark watches a running process from inside the Linux kernel, captures the traffic it actually sends and receives, and turns a real HTTP interaction plus its Redis calls into a replayable test fixture.
+
+![Wiremark's live trace view: HTTP and Redis syscalls, colorized by operation, as they happen](docs/media/trace-live.gif)
 
 New to eBPF, syscalls, or this project generally? [`GUIDE.md`](GUIDE.md) explains everything from scratch, in plain language, before you read the reference below.
 
@@ -256,6 +269,23 @@ Then send the same request again.
 
 The application still connects to Redis. It just reaches Wiremark's replay proxy instead of a real Redis server.
 
+![Recording a request, stopping Redis, then replaying the interaction from the recording](docs/media/record-replay.gif)
+
+<details>
+<summary>See it recorded, Redis killed, and replayed (stills)</summary>
+
+<br>
+
+Redis is stopped and the recording is played back:
+
+![Redis stopped, recording written to test.yaml](docs/media/redis-dead.png)
+
+The application runs again against the recording, no live Redis required:
+
+![Replay succeeds with Redis off](docs/media/replay-success.png)
+
+</details>
+
 ---
 
 ## Live tracing
@@ -478,7 +508,7 @@ The order matters less than keeping the core workflow useful.
 
 Current development requires:
 
-- Go 1.21+
+- Go 1.25+
 - clang / LLVM
 - `libbpf-dev`
 - `bpftool`

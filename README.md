@@ -296,6 +296,8 @@ The tracer has three views in the TUI:
 
 The raw event stream: syscall activity and, with `--tls`, OpenSSL plaintext events.
 
+![The Events tab: colorized syscalls, methods, and statuses as they stream in](docs/media/events-tab.png)
+
 ### Connections
 
 Connections assembled from the observed socket activity, including the remote endpoint and cumulative bytes in/out.

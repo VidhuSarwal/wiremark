@@ -22,6 +22,10 @@ import (
 	"github.com/vidhusarwal/wiremark/internal/tui"
 )
 
+// version is set at build time via -ldflags "-X main.version=...";
+// the release workflow embeds the git tag there.
+var version = "dev"
+
 func main() {
 	if err := rootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -30,7 +34,7 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
-	root := &cobra.Command{Use: "wiremark"}
+	root := &cobra.Command{Use: "wiremark", Version: version}
 	root.AddCommand(traceCmd())
 	root.AddCommand(recordCmd())
 	root.AddCommand(runCmd())

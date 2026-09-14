@@ -10,7 +10,7 @@
 Record a real HTTP request and the Redis calls behind it. Replay the same interaction later — without Redis running.
 
 ```bash
-curl wiremark.vidhux.dev/install | sh
+curl -fsSL https://wiremark.vidhux.dev/install | sh
 ```
 
 Wiremark watches a running process from inside the Linux kernel, captures the traffic it actually sends and receives, and turns a real HTTP interaction plus its Redis calls into a replayable test fixture.

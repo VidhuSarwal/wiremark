@@ -37,12 +37,13 @@ jobs:
         env:
           ARCH: ${{ matrix.goarch }}
           VERSION: ${{ github.ref_name }}
-          BINARY: dist/wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          cp "dist/wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}" dist/wiremark-bin
           VERSION="${VERSION#v}" \
             "$(go env GOPATH)/bin/nfpm" package --config nfpm.yaml --packager deb \
               --target "dist/wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}.deb"
+          rm dist/wiremark-bin
           ( cd dist && sha256sum "wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}.deb" \
               > "wiremark_${{ github.ref_name }}_linux_${{ matrix.goarch }}.deb.sha256" )
 

@@ -27,18 +27,44 @@ import (
 var version = "dev"
 
 func main() {
+	if shouldShowFirstRunBanner(os.Args[1:]) {
+		maybePrintFirstRunBanner()
+	}
+
 	if err := rootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
+// shouldShowFirstRunBanner skips the one-time banner for invocations that
+// are already a request for guidance (bare command, quickstart, --help) --
+// those already explain themselves, so the banner would just be noise on
+// top of noise.
+func shouldShowFirstRunBanner(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "quickstart", "--help", "-h":
+		return false
+	}
+	return true
+}
+
 func rootCmd() *cobra.Command {
-	root := &cobra.Command{Use: "wiremark", Version: version}
+	root := &cobra.Command{
+		Use:     "wiremark",
+		Version: version,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Fprint(cmd.OutOrStdout(), introText)
+		},
+	}
 	root.AddCommand(traceCmd())
 	root.AddCommand(recordCmd())
 	root.AddCommand(runCmd())
 	root.AddCommand(launchCmd())
+	root.AddCommand(quickstartCmd())
 	return root
 }
 
